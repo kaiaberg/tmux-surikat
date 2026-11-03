@@ -127,7 +127,7 @@ out=$(decide 1) || out=$(decide 0) || exit 0
 decision=${out%%$'\n'*}
 record=${out#*$'\n'}
 
-IFS=$US read -r action state prev oldpid <<<"$decision"
+IFS=$US read -r action state _ oldpid <<<"$decision"
 
 case $action in
   noop) exit 0 ;;
@@ -143,8 +143,8 @@ esac
 # The Claude PID, for crash GC: walk up past shells (hooks run as
 # claude -> sh -c -> this script). Only needed once per process.
 find_pid() {
-  local p=$PPID i pp comm base
-  for i in 1 2 3 4; do
+  local p=$PPID pp comm base
+  for _ in 1 2 3 4; do
     read -r pp comm <<<"$(ps -o ppid= -o comm= -p "$p" 2>/dev/null)" || return 0
     [ -n "$comm" ] || return 0
     base=${comm##*/}
@@ -164,7 +164,7 @@ if [ "$event" = start ] || [ -z "$oldpid" ]; then
   [[ $pid =~ ^[0-9]+$ ]] || pid=
 fi
 
-target= wname= socket=
+target='' wname='' socket=''
 if [ -n "$pane" ] && command -v tmux >/dev/null 2>&1; then
   info=$(tmux set -p -t "$pane" @surikat "$state" \; \
     display -p -t "$pane" "#{session_name}:#{window_index}.#{pane_index}${US}#{window_name}${US}#{socket_path}")

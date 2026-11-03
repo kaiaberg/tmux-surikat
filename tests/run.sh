@@ -113,10 +113,10 @@ hook tool "$P1" "$(js s1 '{tool_name: "Bash", tool_input: {command: "rm -rf buil
 check "approved tool -> running" eq "$(field s1 state)" running
 check "pending cleared" eq "$(field s1 pending)" ""
 hook stop "$P1" "$(js s1 '{last_assistant_message: "All done."}')"
-check "stop -> done" eq "$(field s1 state)" done
+check "stop -> done" eq "$(field s1 state)" 'done'
 check "done message" eq "$(field s1 message)" "All done."
 hook notify "$P1" "$(js s1 '{notification_type: "idle_prompt", message: "Claude is waiting for your input"}')"
-check "idle after done ignored" eq "$(field s1 state)" done
+check "idle after done ignored" eq "$(field s1 state)" 'done'
 hook prompt "$P1" "$(js s1 '{prompt: "next"}')"
 hook notify "$P1" "$(js s1 '{notification_type: "idle_prompt", message: "Claude is waiting for your input"}')"
 check "idle after an interrupt" eq "$(field s1 state)" idle
@@ -133,7 +133,7 @@ check "StopFailure -> idle" eq "$(field s1 state)" idle
 check "StopFailure message" eq "$(field s1 message)" rate_limit
 hook stop "$P1" "$(js s1 '{last_assistant_message: "ok"}')"
 hook start "$P1" "$(js s1 '{source: "compact"}')"
-check "compaction keeps the state" eq "$(field s1 state)" done
+check "compaction keeps the state" eq "$(field s1 state)" 'done'
 hook start "$P1" "$(js s1 '{source: "resume"}')"
 check "resume -> ready" eq "$(field s1 state)" ready
 hook end "$P1" "$(js s1 '{reason: "exit"}')"

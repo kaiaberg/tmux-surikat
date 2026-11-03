@@ -74,6 +74,7 @@ S=$HOME/.claude/settings.json
 check "foreign hook kept" test "$(jq '[.hooks.Stop[].hooks[] | select(.command == "say done")] | length' "$S")" = 1
 check "theme kept" test "$(jq -r .theme "$S")" = dark
 check "one surikat handler per event" test "$(jq '[.hooks[][] .hooks[] | select(.command | test("surikat-hook"))] | length' "$S")" = 9
+# shellcheck disable=SC2088 # the literal ~ is what we expect
 check "hook command uses literal ~" test "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$S")" = "~/.local/bin/surikat-hook start"
 check "settings backup exists" sh -c "ls '$S'.bak.* >/dev/null 2>&1"
 

@@ -77,9 +77,9 @@ jq_records() {
 }
 
 # Sets SOCKET and LIVE (" %1 %2 ... ") for the current tmux server.
-SOCKET= LIVE=
+SOCKET='' LIVE=''
 load_live() {
-  SOCKET= LIVE=" "
+  SOCKET='' LIVE=" "
   local out s p
   out=$(tmux list-panes -a -F "#{socket_path}${US}#{pane_id}" 2>/dev/null) || return 0
   while IFS=$US read -r s p; do
@@ -144,8 +144,8 @@ EOF
 }
 
 summary() {
-  local out= s n icon
-  for s in perm ask idle done; do
+  local out='' s n icon x
+  for s in perm ask idle 'done'; do
     case $s in
       perm) icon=🔴 ;;
       ask) icon=❓ ;;
@@ -181,14 +181,14 @@ rows() {
     | "\(.pane // "")\t\(icon) \(age | fit(4)) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))"'
 }
 
-table() { rows "$@" | cut -f2-; }
+table() { rows | cut -f2-; }
 
 # Sets CLIENT (name) and CUR (its current pane). Uses --client if given and
 # attached, else the most recently active client, else the server's
 # current pane (no client attached, e.g. in tests).
 CUR=
 ctx() {
-  local want=$CLIENT name pane act best_act=-1 bname= bpane= out
+  local want=$CLIENT name pane act best_act=-1 bname='' bpane='' out
   CUR=
   out=$(tmux list-clients -F "#{client_name}${US}#{pane_id}${US}#{client_activity}" 2>/dev/null)
   while IFS=$US read -r name pane act; do
@@ -266,7 +266,7 @@ next() {
     msg "no Claude session is waiting"
     return 0
   fi
-  local first= target= found=0 p
+  local first='' target='' found=0 p
   while read -r p; do
     [ -n "$first" ] || first=$p
     if [ $found = 1 ]; then
