@@ -233,7 +233,9 @@ trail_push() {
   rm -f "$tmp"
 }
 
-pane_exists() { [ -n "$1" ] && tmux display -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
+# Compare the output: `display -p -t <dead pane>` prints nothing but can
+# still exit 0.
+pane_exists() { [ -n "$1" ] && [ "$(tmux display -p -t "$1" '#{pane_id}' 2>/dev/null)" = "$1" ]; }
 
 jump() {
   local target=$1 record=${2:-0}
