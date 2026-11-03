@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# surikat-hook: Claude Code hook that records each session's state.
+#
+# Usage (wired up in ~/.claude/settings.json by install.sh):
+#   surikat-hook <start|prompt|tool|perm|notify|stop|fail|end>   < hook JSON
+#
+# Writes $STATE_DIR/<session_id>.json and sets the tmux pane option
+# @surikat=<state>. It must never break or slow down Claude: no output,
+# always exit 0, never block.
+#
+# Portable: bash >= 3.2, no /proc, no GNU-only tools.
+
+exec >/dev/null 2>&1
+[ -t 0 ] && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+event=${1:-}
+case $event in
+  start | prompt | tool | perm | notify | stop | fail | end) ;;
+  *) exit 0 ;;
+esac
+
+input=$(cat) || exit 0
+[ -n "$input" ] || exit 0
+
+# The top-level session_id comes first in the hook JSON. jq checks it again
+# below, so a "session_id" nested in tool input can't redirect the write.
+re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
+[[ $input =~ $re ]] || exit 0
+sid=${BASH_REMATCH[1]}
+
+host=${HOSTNAME:-$(hostname)}
+host=${host%%.*}
+dir=${SURIKAT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/surikat/$host}
+[ -d "$dir" ] || (umask 077 && mkdir -p "$dir") || exit 0
+file=$dir/$sid.json
+
+pane=${TMUX_PANE:-}
+[[ $pane =~ ^%[0-9]+$ ]] || pane=
+US=$'\x1f'
+
+# One jq call decides everything. Output: a decision line
+# "noop" | "end" | "write<US>state<US>prev<US>pid", then the new record.
+# shellcheck disable=SC2016
+PROG='
+def clean: tostring | gsub("[[:cntrl:]]+"; " ") | gsub("^ +| +$"; "") | .[0:300];
+def subject:
+  (.tool_input // {}) as $t
+  | ($t.command // $t.file_path // $t.notebook_path // $t.url // $t.pattern
+     // $t.path // $t.query // $t.description // $t.prompt // "")
+  | if type == "string" then . else tojson end;
+def key: "\(.tool_name // ""): \(subject)" | clean;
+def questions:
+  [(.tool_input.questions // [])[]? | (.question? // empty) | tostring] | join(" / ");
+
+. as $in
+| if (.session_id // "") != $sid then empty else
+  ($prevs[0] // {}) as $p
+  | ($p.state // "") as $prev
+  | (if $ev == "start" then
+       {state: (if .source == "compact" then (if $prev == "" then "running" else $prev end)
+                else "ready" end), msg: ""}
+     elif $ev == "prompt" then
+       {state: "running", msg: "", pending: "", prompt: (.prompt // "" | clean)}
+     elif $ev == "tool" then
+       if ($prev == "perm" or $prev == "ask") and ((.agent_id // "") != "")
+          and ((key | @base64) != ($p.pending // ""))
+       then {state: $prev, msg: ""}
+       else {state: "running", msg: "", pending: ""} end
+     elif $ev == "perm" then
+       if .tool_name == "AskUserQuestion"
+       then {state: "ask", msg: (questions | clean), pending: (key | @base64)}
+       else {state: "perm", msg: key, pending: (key | @base64)} end
+     elif $ev == "notify" then
+       (.notification_type // "") as $nt
+       | (.message // "" | tostring) as $m
+       | (if ($nt | IN("permission_prompt", "elicitation_dialog",
+                       "elicitation_url_dialog", "agent_needs_input")) then "perm"
+          elif $nt == "idle_prompt" then "idle"
+          elif $nt == "" then (if ($m | test("permission"; "i")) then "perm" else "idle" end)
+          else "" end) as $s
+       | if $s == "" or $s == $prev
+            or ($s == "idle" and ($prev | IN("done", "ready", "idle")))
+            or ($s == "perm" and $prev == "ask")
+         then {state: ""}
+         else {state: $s, msg: ($m | clean)} end
+     elif $ev == "stop" then
+       {state: "done", msg: (.last_assistant_message // "" | clean), pending: ""}
+     elif $ev == "fail" then
+       {state: "idle", msg: (.error // "API error" | clean), pending: ""}
+     else {state: "end"} end) as $d
+  | if $d.state == "" then "noop"
+    elif $d.state == "end" then "end"
+    elif $ev == "tool" and $d.state == "running" and $prev == "running" then "noop"
+    else
+      (now | floor) as $now
+      | ($p + {
+          session_id: $sid,
+          state: $d.state,
+          ts: $now,
+          since: (if $d.state == $prev and ($p.since // null) != null then $p.since else $now end),
+          pane: (if $pane != "" then $pane else ($p.pane // "") end),
+          cwd: ($in.cwd // $p.cwd // ""),
+          message: (if $d.msg == "" and $d.state == $prev then ($p.message // "") else $d.msg end),
+          prompt: ($d.prompt // $p.prompt // ""),
+          pending: (if $d | has("pending") then $d.pending else ($p.pending // "") end)
+        }
+        | .project = (.cwd | sub("/+$"; "") | split("/") | last // ""))
+      | ("write\u001f\(.state)\u001f\($prev)\u001f\(.pid // "")", tojson)
+    end
+  end
+'
+
+decide() {
+  if [ "$1" = 1 ] && [ -f "$file" ]; then
+    printf '%s' "$input" | jq -r --arg ev "$event" --arg sid "$sid" --arg pane "$pane" \
+      --slurpfile prevs "$file" "$PROG"
+  else
+    printf '%s' "$input" | jq -r --arg ev "$event" --arg sid "$sid" --arg pane "$pane" \
+      --argjson prevs '[]' "$PROG"
+  fi
+}
+
+# A corrupt record must not wedge the session: retry without it.
+out=$(decide 1) || out=$(decide 0) || exit 0
+[ -n "$out" ] || exit 0
+decision=${out%%$'\n'*}
+record=${out#*$'\n'}
+
+IFS=$US read -r action state prev oldpid <<<"$decision"
+
+case $action in
+  noop) exit 0 ;;
+  end)
+    rm -f "$file"
+    [ -n "$pane" ] && tmux set -pu -t "$pane" @surikat
+    exit 0
+    ;;
+  write) ;;
+  *) exit 0 ;;
+esac
+
+# The Claude PID, for crash GC: walk up past shells (hooks run as
+# claude -> sh -c -> this script). Only needed once per process.
+find_pid() {
+  local p=$PPID i pp comm base
+  for i in 1 2 3 4; do
+    read -r pp comm <<<"$(ps -o ppid= -o comm= -p "$p" 2>/dev/null)" || return 0
+    [ -n "$comm" ] || return 0
+    base=${comm##*/}
+    base=${base#-}
+    case $base in
+      sh | bash | dash | zsh | fish | env | timeout) p=$pp ;;
+      *)
+        echo "$p"
+        return 0
+        ;;
+    esac
+  done
+}
+pid=
+if [ "$event" = start ] || [ -z "$oldpid" ]; then
+  pid=$(find_pid)
+  [[ $pid =~ ^[0-9]+$ ]] || pid=
+fi
+
+target= wname= socket=
+if [ -n "$pane" ] && command -v tmux >/dev/null 2>&1; then
+  info=$(tmux set -p -t "$pane" @surikat "$state" \; \
+    display -p -t "$pane" "#{session_name}:#{window_index}.#{pane_index}${US}#{window_name}${US}#{socket_path}")
+  IFS=$US read -r target wname socket <<<"$info"
+fi
+
+tmp=$file.tmp.$$
+# shellcheck disable=SC2016
+if printf '%s' "$record" | jq -c --arg pid "$pid" --arg t "$target" --arg w "$wname" --arg s "$socket" '
+    (if $pid != "" then .pid = ($pid | tonumber) else . end)
+    | (if $t != "" then .tmux_target = $t | .window_name = $w | .socket = $s else . end)
+  ' >"$tmp"; then
+  mv -f "$tmp" "$file"
+fi
+rm -f "$tmp"
+exit 0
