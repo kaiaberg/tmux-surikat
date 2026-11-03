@@ -312,6 +312,60 @@ for sh in sh bash zsh fish; do
   check "fzf preview command works in $sh" eq "$out" "proj-sh1  /work/proj-sh1"
 done
 
+if command -v fzf >/dev/null; then
+  echo "--- picker (fzf $(fzf --version | cut -d' ' -f1))"
+  # wait_for PANE TEXT: poll the pane until TEXT shows up (max ~5s).
+  wait_for() {
+    local i=0
+    while [ $i -lt 50 ]; do
+      tmux capture-pane -p -t "$1" 2>/dev/null | grep -qF "$2" && return 0
+      sleep 0.1
+      i=$((i + 1))
+    done
+    tmux capture-pane -p -t "$1" 2>/dev/null | sed 's/^/     | /'
+    return 1
+  }
+  # open_picker: run the dashboard in a new window, print its pane id.
+  open_picker() {
+    tmux new-window -P -F '#{pane_id}' -t main \
+      "env SURIKAT_DIR='$SURIKAT_DIR' PATH='$PATH' '$BIN/surikat'"
+  }
+  reset_state
+  hook perm "$P1" "$(js f1 '{tool_name: "Bash", tool_input: {command: "make deploy"}}')"
+  hook stop "$P3" "$(js f2 '{last_assistant_message: "tests pass"}')"
+  setf f1 '.since = 1000'
+  PK=$(open_picker)
+  check "picker shows the legend" wait_for "$PK" "needs permission"
+  check "picker lists sessions" wait_for "$PK" "make deploy"
+  check "picker previews the pane" wait_for "$PK" "prompt:"
+  tmux send-keys -t "$PK" Enter
+  i=0
+  while [ "$(cur)" != "$P1" ] && [ $i -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  check "enter jumps to the selected session" eq "$(cur)" "$P1"
+  check "enter records the trail" test -s "$SURIKAT_DIR/.trail-noclient"
+  PK=$(open_picker)
+  wait_for "$PK" "tests pass" >/dev/null
+  tmux send-keys -t "$PK" Down C-x
+  i=0
+  while [ "$(field f2 state)" != ready ] && [ $i -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  check "ctrl-x marks the session as seen" eq "$(field f2 state)" ready
+  check "ctrl-x leaves the picker open" wait_for "$PK" "ready/seen"
+  tmux send-keys -t "$PK" Escape
+  i=0
+  while pane_alive=$(tmux display -p -t "$PK" '#{pane_id}' 2>/dev/null) &&
+    [ "$pane_alive" = "$PK" ] && [ $i -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  check "esc closes the picker" test "$(tmux display -p -t "$PK" '#{pane_id}' 2>/dev/null)" != "$PK"
+fi
+
 echo
 echo "$pass passed, $failed failed"
 [ $failed = 0 ]
