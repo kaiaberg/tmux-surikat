@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# surikat-tmux: apply surikat's tmux formats to the running server.
+#
+#   surikat-tmux            apply (idempotent; safe to run on every re-source)
+#   surikat-tmux --remove   undo everything
+#
+# Prepends per-pane icons to the window formats and appends the summary to
+# status-right. It never replaces the user's own styling.
+
+set -u
+
+WIN='#{E:@surikat_window_icons}'
+ICON='#{?#{==:#{@surikat},perm},🔴 ,#{?#{==:#{@surikat},ask},❓ ,#{?#{==:#{@surikat},idle},🟡 ,#{?#{==:#{@surikat},done},🟢 ,#{?#{==:#{@surikat},running},⚙ ,}}}}}'
+
+# Where `surikat` lives, as tmux should call it from status-right. Keep a
+# literal ~ for paths under $HOME so the format stays readable and portable.
+bin=${SURIKAT_BIN:-$(cd "$(dirname "$0")" && pwd)}
+case $bin in
+  "$HOME"/*) bin="~${bin#"$HOME"}" ;;
+esac
+COUNT=" #($bin/surikat --count)"
+
+get() { tmux show -gv "$1" 2>/dev/null; }
+
+# Remember an option's value before the first change, so --remove can
+# restore it.
+save() {
+  [ -n "$(get "@surikat_orig_$1")" ] || tmux set -g "@surikat_orig_$1" "$2"
+}
+
+strip_count() { sed 's| #([^)]*/surikat --count)||g'; }
+
+apply() {
+  tmux set -g @surikat_pane_icon "$ICON" \; \
+    set -g @surikat_window_icons '#{P:#{E:@surikat_pane_icon}}'
+
+  local o v n
+  for o in window-status-format window-status-current-format; do
+    v=$(get "$o")
+    case $v in
+      *"$WIN"*) ;;
+      *) tmux set -g "$o" "$WIN$v" ;;
+    esac
+  done
+
+  v=$(get status-right)
+  case $v in
+    *"/surikat --count)"*) ;;
+    *) tmux set -g status-right "$v$COUNT" ;;
+  esac
+
+  n=$(get status-right-length)
+  if [ "${n:-0}" -lt 80 ] 2>/dev/null; then
+    save status_right_length "${n:-0}"
+    tmux set -g status-right-length 80
+  fi
+
+  n=$(get status-interval)
+  if [ "${n:-0}" -eq 0 ] 2>/dev/null || [ "${n:-0}" -gt 5 ] 2>/dev/null; then
+    save status_interval "${n:-0}"
+    tmux set -g status-interval 5
+  fi
+}
+
+remove() {
+  local o v
+  for o in window-status-format window-status-current-format; do
+    v=$(get "$o")
+    case $v in
+      *"$WIN"*) tmux set -g "$o" "${v//"$WIN"/}" ;;
+    esac
+  done
+
+  v=$(get status-right)
+  case $v in
+    *"/surikat --count)"*) tmux set -g status-right "$(printf '%s' "$v" | strip_count)" ;;
+  esac
+
+  v=$(get @surikat_orig_status_right_length)
+  [ -n "$v" ] && tmux set -g status-right-length "$v"
+  v=$(get @surikat_orig_status_interval)
+  [ -n "$v" ] && tmux set -g status-interval "$v"
+
+  tmux set -gu @surikat_pane_icon \; set -gu @surikat_window_icons \; \
+    set -gu @surikat_orig_status_right_length \; set -gu @surikat_orig_status_interval \; \
+    bind C customize-mode -Z \; unbind N \; unbind P \; unbind T
+
+  local p
+  for p in $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null); do
+    tmux set -pu -t "$p" @surikat 2>/dev/null
+  done
+}
+
+case ${1:-} in
+  "") apply ;;
+  --remove) remove ;;
+  -h | --help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)
+    echo "usage: surikat-tmux [--remove]" >&2
+    exit 2
+    ;;
+esac
