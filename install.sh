@@ -57,6 +57,8 @@ for a in "$@"; do
 done
 
 say() { printf '%s\n' "$*"; }
+# Report something that was done (silent in a dry run; run() already said it).
+did() { [ $dry = 1 ] || say "$@"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die() {
   printf 'error: %s\n' "$*" >&2
@@ -123,7 +125,7 @@ install_scripts() {
         backup "$dest"
       fi
       run ln -sfn "$src" "$dest"
-      say "  $s: linked"
+      did "  $s: linked"
     else
       if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
         say "  $s: up to date"
@@ -133,7 +135,7 @@ install_scripts() {
       run rm -f "$dest"
       run cp "$src" "$dest"
       run chmod 755 "$dest"
-      say "  $s: copied"
+      did "  $s: copied"
     fi
   done
   case ":$PATH:" in
@@ -150,10 +152,10 @@ uninstall_scripts() {
     dest=$BIN_DIR/$s
     if [ -L "$dest" ] && [ "$(readlink "$dest")" = "$src" ]; then
       run rm -f "$dest"
-      say "  $s: removed"
+      did "  $s: removed"
     elif [ -f "$dest" ] && cmp -s "$src" "$dest"; then
       run rm -f "$dest"
-      say "  $s: removed"
+      did "  $s: removed"
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
       warn "$dest is not from this repo; left in place"
     fi
@@ -174,7 +176,7 @@ install_tmux_conf() {
     else
       if [ -f "$CONF" ] && [ ! -L "$CONF" ]; then backup "$CONF"; fi
       run ln -sfn "$src" "$CONF"
-      say "  surikat.conf: linked"
+      did "  surikat.conf: linked"
     fi
   else
     sed "s#~/.local/bin#$BIN_DIR#g" "$src" >"$TMPD/surikat.conf"
@@ -184,7 +186,7 @@ install_tmux_conf() {
       if [ -f "$CONF" ] && [ ! -L "$CONF" ]; then backup "$CONF"; fi
       run rm -f "$CONF"
       run cp "$TMPD/surikat.conf" "$CONF"
-      say "  surikat.conf: written"
+      did "  surikat.conf: written"
     fi
   fi
 
@@ -213,7 +215,7 @@ install_tmux_conf() {
     # Only our own file: re-sourcing the user's whole config can have side
     # effects (or errors) that have nothing to do with surikat.
     run tmux source-file "$CONF"
-    say "  loaded into the running tmux server"
+    did "  loaded into the running tmux server"
   fi
 }
 
@@ -221,7 +223,7 @@ uninstall_tmux_conf() {
   say "tmux"
   if tmux_running && [ -n "$(tmux show -gv @surikat_pane_icon 2>/dev/null)" ]; then
     run "$REPO/bin/surikat-tmux" --remove
-    say "  removed formats and key bindings from the running server"
+    did "  removed formats and key bindings from the running server"
   fi
 
   if [ -f "$TMUX_CONF" ] && grep -qxF "$SOURCE_LINE" "$TMUX_CONF"; then
@@ -255,7 +257,7 @@ uninstall_tmux_conf() {
 
   if [ -L "$CONF" ] || { [ -f "$CONF" ] && grep -q surikat-tmux "$CONF"; }; then
     run rm -f "$CONF"
-    say "  removed $CONF"
+    did "  removed $CONF"
     [ $dry = 1 ] || rmdir "$CONF_DIR" 2>/dev/null || true
   fi
 }
@@ -328,7 +330,7 @@ remove_state() {
   esac
   if [ -d "$STATE_DIR" ]; then
     run rm -rf "$STATE_DIR"
-    say "state: removed $STATE_DIR"
+    did "state: removed $STATE_DIR"
     [ $dry = 1 ] || rmdir "$(dirname "$STATE_DIR")" 2>/dev/null || true
   fi
 }
