@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+# surikat: dashboard and navigation for Claude Code sessions in tmux.
+#
+#   surikat              fzf picker with live pane preview (prefix C)
+#   surikat --next       jump to the most urgent, oldest waiting session;
+#                        again: the next one in the queue (prefix N)
+#   surikat --back       jump back along this client's trail (prefix P)
+#   surikat --count      one-line summary for status-right
+#   surikat --list       print the table once
+#   surikat --watch [s]  live table, refreshed every s seconds (default 2)
+#   surikat --gc         garbage-collect stale records
+#
+#   --client NAME        tmux client to act for (the key bindings pass it)
+#
+# Internal: --rows, --preview PANE, --jump [--record] PANE, --seen PANE
+#
+# Portable: bash >= 3.2, no /proc, no GNU-only tools.
+
+set -u
+
+US=$'\x1f'
+host=${HOSTNAME:-$(hostname)}
+host=${host%%.*}
+DIR=${SURIKAT_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/surikat/$host}
+STALE_HOURS=${SURIKAT_STALE_HOURS:-24}
+INTERVAL=${SURIKAT_INTERVAL:-2}
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+CLIENT=
+
+LEGEND='🔴 needs permission · ❓ asks a question · 🟡 waiting for input · 🟢 finished · ⚙️ working · ⚪ ready/seen'
+
+# shellcheck disable=SC2016
+JQ_DEFS='
+def pri: {"perm": 0, "ask": 0, "idle": 1, "done": 2, "running": 3, "ready": 4}[.state // ""] // 5;
+def icon: {"perm": "🔴", "ask": "❓", "idle": "🟡", "done": "🟢", "running": "⚙️", "ready": "⚪"}[.state // ""] // "· ";
+def age: ((now - (.since // now)) | if . < 0 then 0 else floor end) as $s
+  | if $s < 60 then "\($s)s" elif $s < 3600 then "\($s / 60 | floor)m"
+    elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
+def pad($n): if length >= $n then . else . + (" " * ($n - length)) end;
+def fit($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else pad($n) end;
+def cut($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else . end;
+def ordered: sort_by(pri, (.since // 0));
+'
+
+# Record files, or nothing (bash 3.2: no nullglob tricks needed).
+records() {
+  local f
+  for f in "$DIR"/*.json; do
+    [ -e "$f" ] && printf '%s\n' "$f"
+  done
+}
+
+have_records() { [ -n "$(records | head -n 1)" ]; }
+
+# Run jq over all records; a corrupt file is removed and the call retried.
+jq_records() {
+  local files out
+  files=$(records)
+  [ -n "$files" ] || return 0
+  local IFS=$'\n'
+  # shellcheck disable=SC2086
+  if out=$(jq "$@" $files 2>/dev/null); then
+    printf '%s' "$out"
+    [ -n "$out" ] && echo
+    return 0
+  fi
+  local f
+  for f in $files; do
+    jq -e . "$f" >/dev/null 2>&1 || rm -f "$f"
+  done
+  files=$(records)
+  [ -n "$files" ] || return 0
+  # shellcheck disable=SC2086
+  out=$(jq "$@" $files 2>/dev/null) || return 0
+  printf '%s' "$out"
+  [ -n "$out" ] && echo
+}
+
+# Sets SOCKET and LIVE (" %1 %2 ... ") for the current tmux server.
+SOCKET= LIVE=
+load_live() {
+  SOCKET= LIVE=" "
+  local out s p
+  out=$(tmux list-panes -a -F "#{socket_path}${US}#{pane_id}" 2>/dev/null) || return 0
+  while IFS=$US read -r s p; do
+    [ -n "$p" ] || continue
+    SOCKET=$s
+    LIVE="$LIVE$p "
+  done <<EOF
+$out
+EOF
+}
+
+pane_live() {
+  case $LIVE in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# GC: drop a record whose pane is gone (only judged for this tmux server,
+# see L7), whose Claude process is dead, or that is stale. Sets COUNTS.
+COUNTS=
+gc() {
+  load_live
+  COUNTS=
+  local tmp
+  for tmp in "$DIR"/*.tmp.*; do
+    if [ -e "$tmp" ]; then
+      find "$DIR" -maxdepth 1 -name '*.tmp.*' -mmin +1 -exec rm -f {} + 2>/dev/null
+      break
+    fi
+  done
+  have_records || return 0
+
+  local lines f sock pane pid state stale drop
+  # shellcheck disable=SC2016
+  lines=$(jq_records -r --argjson h "$STALE_HOURS" '
+    [input_filename, (.socket // ""), (.pane // ""), (.pid // "" | tostring), (.state // ""),
+     (if ((.state // "") | IN("running", "ready")) and (now - (.ts // 0)) > ($h * 3600)
+      then "1" else "0" end)] | join("\u001f")')
+  while IFS=$US read -r f sock pane pid state stale; do
+    [ -n "$f" ] || continue
+    drop=0
+    if [ -n "$pane" ] && [ -n "$SOCKET" ] && [ "$sock" = "$SOCKET" ] && [ "$LIVE" != " " ] &&
+      ! pane_live "$pane"; then
+      drop=1
+    elif [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      drop=1
+    elif [ "$stale" = 1 ]; then
+      drop=1
+    fi
+    if [ $drop = 1 ]; then
+      rm -f "$f"
+      if [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_live "$pane"; then
+        tmux set -pu -t "$pane" @surikat 2>/dev/null
+      fi
+    else
+      COUNTS="$COUNTS $state"
+    fi
+  done <<EOF
+$lines
+EOF
+}
+
+summary() {
+  local out= s n icon
+  for s in perm ask idle done; do
+    case $s in
+      perm) icon=🔴 ;;
+      ask) icon=❓ ;;
+      idle) icon=🟡 ;;
+      done) icon=🟢 ;;
+    esac
+    n=0
+    for x in $COUNTS; do [ "$x" = "$s" ] && n=$((n + 1)); done
+    [ $n -gt 0 ] && out="$out${out:+ }$icon$n"
+  done
+  [ -n "$out" ] && printf '%s\n' "$out"
+  return 0
+}
+
+width() {
+  local w=${SURIKAT_WIDTH:-${COLUMNS:-}}
+  [ -n "$w" ] || w=$(tput cols 2>/dev/null)
+  [ "${w:-0}" -gt 0 ] 2>/dev/null || w=100
+  echo "$w"
+}
+
+# pane<TAB>icon age target window project message, sorted by urgency.
+# With a socket, only records of that tmux server (jumpable ones).
+rows() {
+  local sock=${1:-} w
+  w=$(width)
+  # shellcheck disable=SC2016
+  jq_records -r -s --arg sock "$sock" --argjson w "$w" "$JQ_DEFS"'
+    ($w - 45) as $mw
+    | map(select($sock == "" or (.socket // "") == $sock)) | ordered | .[]
+    | ((.message // "") | if . == "" then "" else . end) as $m
+    | (if $m == "" then (.prompt // "") else $m end) as $msg
+    | "\(.pane // "")\t\(icon) \(age | fit(4)) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))"'
+}
+
+table() { rows "$@" | cut -f2-; }
+
+# Sets CLIENT (name) and CUR (its current pane). Uses --client if given and
+# attached, else the most recently active client, else the server's
+# current pane (no client attached, e.g. in tests).
+CUR=
+ctx() {
+  local want=$CLIENT name pane act best_act=-1 bname= bpane= out
+  CUR=
+  out=$(tmux list-clients -F "#{client_name}${US}#{pane_id}${US}#{client_activity}" 2>/dev/null)
+  while IFS=$US read -r name pane act; do
+    [ -n "$name" ] || continue
+    if [ -n "$want" ] && [ "$name" = "$want" ]; then
+      bname=$name bpane=$pane
+      break
+    fi
+    if [ "${act:-0}" -gt "$best_act" ] 2>/dev/null; then
+      best_act=$act bname=$name bpane=$pane
+    fi
+  done <<EOF
+$out
+EOF
+  CLIENT=$bname
+  CUR=$bpane
+  [ -n "$CUR" ] || CUR=$(tmux display -p '#{pane_id}' 2>/dev/null)
+}
+
+msg() {
+  if [ -n "$CLIENT" ]; then
+    tmux display-message -c "$CLIENT" "surikat: $*" 2>/dev/null
+  else
+    tmux display-message "surikat: $*" 2>/dev/null || echo "surikat: $*"
+  fi
+}
+
+trail_file() {
+  local c=${CLIENT:-noclient}
+  c=$(printf '%s' "$c" | tr -c 'A-Za-z0-9._-' '_')
+  echo "$DIR/.trail-$c"
+}
+
+trail_push() {
+  local t last tmp
+  t=$(trail_file)
+  last=$(tail -n 1 "$t" 2>/dev/null)
+  [ "$last" = "$1" ] && return 0
+  mkdir -p "$DIR"
+  tmp=$t.tmp.$$
+  { [ -f "$t" ] && cat "$t"; printf '%s\n' "$1"; } | tail -n 20 >"$tmp" && mv -f "$tmp" "$t"
+  rm -f "$tmp"
+}
+
+pane_exists() { [ -n "$1" ] && tmux display -p -t "$1" '#{pane_id}' >/dev/null 2>&1; }
+
+jump() {
+  local target=$1 record=${2:-0}
+  [ -n "$CUR" ] || ctx
+  pane_exists "$target" || {
+    msg "that pane no longer exists"
+    return 1
+  }
+  if [ "$record" = 1 ] && [ -n "$CUR" ] && [ "$CUR" != "$target" ]; then
+    trail_push "$CUR"
+  fi
+  local c=()
+  [ -n "$CLIENT" ] && c=(-c "$CLIENT")
+  tmux switch-client ${c[@]+"${c[@]}"} -t "$target" \; select-window -t "$target" \; select-pane -t "$target" 2>/dev/null ||
+    tmux select-window -t "$target" \; select-pane -t "$target"
+}
+
+next() {
+  gc
+  ctx
+  local queue
+  # shellcheck disable=SC2016
+  queue=$(jq_records -r -s --arg sock "$SOCKET" "$JQ_DEFS"'
+    map(select(pri <= 2 and (.pane // "") != "" and (.socket // "") == $sock)) | ordered
+    | (reduce .[].pane as $p ([]; if any(.[]; . == $p) then . else . + [$p] end)) as $panes
+    | $panes[]')
+  if [ -z "$queue" ]; then
+    msg "no Claude session is waiting"
+    return 0
+  fi
+  local first= target= found=0 p
+  while read -r p; do
+    [ -n "$first" ] || first=$p
+    if [ $found = 1 ]; then
+      target=$p
+      break
+    fi
+    [ "$p" = "$CUR" ] && found=1
+  done <<EOF
+$queue
+EOF
+  [ -n "$target" ] || target=$first
+  if [ "$target" = "$CUR" ]; then
+    msg "this is the only waiting session"
+    return 0
+  fi
+  jump "$target" 1
+}
+
+back() {
+  ctx
+  local t entries=() line i target=
+  t=$(trail_file)
+  if [ -f "$t" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && entries+=("$line")
+    done <"$t"
+  fi
+  i=${#entries[@]}
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    line=${entries[$i]}
+    if [ "$line" != "$CUR" ] && pane_exists "$line"; then
+      target=$line
+      break
+    fi
+  done
+  local tmp=$t.tmp.$$ j=0
+  if [ -f "$t" ]; then
+    : >"$tmp"
+    while [ $j -lt "$i" ]; do
+      printf '%s\n' "${entries[$j]}" >>"$tmp"
+      j=$((j + 1))
+    done
+    mv -f "$tmp" "$t"
+  fi
+  if [ -z "$target" ]; then
+    msg "nothing to go back to"
+    return 0
+  fi
+  jump "$target" 0
+}
+
+seen() {
+  local pane=$1 f tmp files
+  load_live
+  # shellcheck disable=SC2016
+  files=$(jq_records -r --arg p "$pane" --arg sock "$SOCKET" '
+      select(.pane == $p and ((.state // "") | IN("done", "idle"))
+             and ($sock == "" or (.socket // "") == $sock)) | input_filename')
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    tmp=$f.tmp.$$
+    jq -c '.state = "ready" | .since = (now | floor)' "$f" >"$tmp" && mv -f "$tmp" "$f"
+    rm -f "$tmp"
+    tmux set -p -t "$pane" @surikat ready 2>/dev/null
+  done <<EOF
+$files
+EOF
+}
+
+preview() {
+  local pane=$1 lines n esc
+  lines=${FZF_PREVIEW_LINES:-${LINES:-40}}
+  # shellcheck disable=SC2016
+  jq_records -r -s --arg p "$pane" '
+    map(select(.pane == $p)) | sort_by(.ts // 0) | last // empty
+    | "\(.project // "")  \(.cwd // "")", "prompt: \(.prompt // "")", ""'
+  n=$((lines - 3))
+  [ $n -gt 0 ] || n=1
+  esc=$(printf '\033')
+  tmux capture-pane -ep -t "$pane" 2>/dev/null |
+    awk -v e="$esc" '{ a[NR] = $0; l = $0; gsub(e "\\[[0-9;?]*[A-Za-z]", "", l);
+      if (l ~ /[^[:space:]]/) last = NR }
+      END { for (i = 1; i <= last; i++) print a[i] }' |
+    tail -n "$n"
+}
+
+picker() {
+  command -v fzf >/dev/null 2>&1 || {
+    echo "surikat: fzf is not installed; the dashboard needs it."
+    echo "Use 'surikat --list' or 'surikat --watch' instead."
+    sleep 3
+    return 1
+  }
+  gc
+  ctx
+  local w out key sel q="'$SELF'"
+  w=$(width)
+  out=$(SURIKAT_WIDTH=$((w - 2)) rows "$SOCKET" |
+    SURIKAT_WIDTH=$((w - 2)) fzf --ansi --no-sort --reverse --delimiter=$'\t' --with-nth=2.. \
+      --header="$LEGEND"$'\n''enter: jump · ctrl-x: mark seen · ctrl-r: reload · esc: close' \
+      --expect=enter --preview="$q --preview {1}" \
+      --preview-window='down,60%,follow,border-top' \
+      --bind="ctrl-r:reload($q --rows)" \
+      --bind="ctrl-x:execute-silent($q --seen {1})+reload($q --rows)")
+  key=${out%%$'\n'*}
+  sel=${out#*$'\n'}
+  [ "$key" = enter ] && [ "$sel" != "$out" ] || return 0
+  sel=${sel%%$'\t'*}
+  [ -n "$sel" ] && jump "$sel" 1
+}
+
+watch_loop() {
+  local s=${1:-$INTERVAL} buf
+  trap 'printf "\n"; exit 0' INT TERM
+  while :; do
+    gc
+    buf=$(
+      printf 'surikat · %s   %s\n%s\n\n' "$(date +%H:%M:%S)" "$(summary)" "$LEGEND"
+      table
+    )
+    printf '\033[H\033[2J%s\n' "$buf"
+    sleep "$s"
+  done
+}
+
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# --client NAME may appear anywhere.
+args=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --client)
+      CLIENT=${2:-}
+      shift 2 || shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+case ${1:-} in
+  "") picker ;;
+  --next) next ;;
+  --back) back ;;
+  --count) gc && summary ;;
+  --list) gc && table ;;
+  --watch) watch_loop "${2:-}" ;;
+  --gc) gc ;;
+  --rows)
+    load_live
+    rows "$SOCKET"
+    ;;
+  --preview) preview "${2:?pane}" ;;
+  --seen) seen "${2:?pane}" ;;
+  --jump)
+    if [ "${2:-}" = --record ]; then
+      ctx && jump "${3:?pane}" 1
+    else
+      ctx && jump "${2:?pane}" 0
+    fi
+    ;;
+  -h | --help) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
