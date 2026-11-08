@@ -2,17 +2,28 @@
 # surikat: dashboard and navigation for Claude Code sessions in tmux.
 #
 #   surikat              fzf picker with live pane preview (prefix C)
-#   surikat --next       jump to the most urgent, oldest waiting session;
+#   surikat --next       jump to the most urgent, oldest waiting session
+#                        (sidelined ones are skipped);
 #                        again: the next one in the queue (prefix N)
 #   surikat --back       jump back along this client's trail (prefix P)
-#   surikat --count      one-line summary for status-right
+#   surikat --count      one-line summary for status-right (tmux styles)
 #   surikat --list       print the table once
 #   surikat --watch [s]  live table, refreshed every s seconds (default 2)
 #   surikat --gc         garbage-collect stale records
+#   surikat --fav [PANE] toggle PANE (default: the current one) as favorite
+#   surikat --side [PANE] toggle PANE as sidelined
 #
 #   --client NAME        tmux client to act for (the key bindings pass it)
 #
-# Internal: --rows, --preview PANE, --jump [--record] PANE, --seen PANE
+# Sort order: urgency, then favorite / unmarked / sidelined, then wait time
+# (shortest first; `set -g @surikat_order desc` for longest first).
+#
+# Look: `set -g @surikat_style glyph|nerd|emoji` and per-state colors as
+# tmux styles, e.g. `set -g @surikat_color_perm 'fg=red,bold'`.
+#
+# Internal: --rows [--state FILE], --header FILE, --flip FILE,
+#           --preview PANE, --jump [--record] PANE, --seen PANE,
+#           --tmux-icon, --tmux-mark
 #
 # Portable: bash >= 3.2, no /proc, no GNU-only tools.
 
@@ -27,19 +38,182 @@ INTERVAL=${SURIKAT_INTERVAL:-2}
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 CLIENT=
 
-LEGEND='🔴 needs permission · ❓ asks a question · 🟡 waiting for input · 🟢 finished · ⚙️ working · ⚪ ready/seen'
+# --- theme: the one table for how states and marks look everywhere.
+# @surikat_style: glyph (default), nerd (needs a Nerd Font) or emoji.
+# @surikat_color_<name>: a tmux style per state or mark (glyph/nerd only).
+THEME_NAMES='perm ask idle done running ready none fav side'
+THEMED=0 STYLE='' TH_JSON='{}'
+
+# sgr STYLE: tmux style (fg=red,bold,...) -> SGR parameters in SGR ("31;1").
+SGR=
+sgr() {
+  local IFS=, t n c b out=''
+  for t in $1; do
+    n=
+    case $t in
+      fg=* | bg=*)
+        c=${t#*=} b=30
+        [ "${t%%=*}" = bg ] && b=40
+        case $c in
+          bright*) c=${c#bright} b=$((b + 60)) ;;
+        esac
+        case $c in
+          black) n=$b ;;
+          red) n=$((b + 1)) ;;
+          green) n=$((b + 2)) ;;
+          yellow) n=$((b + 3)) ;;
+          blue) n=$((b + 4)) ;;
+          magenta) n=$((b + 5)) ;;
+          cyan) n=$((b + 6)) ;;
+          white) n=$((b + 7)) ;;
+          default) n=$((b + 9)) ;;
+          colour[0-9]* | color[0-9]*) n="$((b + 8));5;${c#colo*r}" ;;
+          '#'[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])
+            n="$((b + 8));2;$((16#${c:1:2}));$((16#${c:3:2}));$((16#${c:5:2}))" ;;
+        esac
+        ;;
+      bold) n=1 ;;
+      dim) n=2 ;;
+      italics) n=3 ;;
+      underscore) n=4 ;;
+      reverse) n=7 ;;
+    esac
+    [ -n "$n" ] && out="$out${out:+;}$n"
+  done
+  SGR=$out
+}
+
+# Sets STYLE, G_<name> (glyph), S_<name> (tmux style), A_<name> (SGR) and
+# TH_JSON ({"perm": {"g": "●", "a": "31"}, ...}) once per run.
+theme() {
+  [ "$THEMED" = 1 ] && return 0
+  THEMED=1
+  local fmt='#{@surikat_style}' name opts glyphs styles g s j=''
+  for name in $THEME_NAMES; do fmt="$fmt$US#{@surikat_color_$name}"; done
+  opts=$(tmux display -p "$fmt" 2>/dev/null)
+  STYLE=${SURIKAT_STYLE:-${opts%%"$US"*}}
+  case $STYLE in
+    nerd) glyphs='      · ★ ↓' ;;
+    emoji) glyphs='🔴 ❓ 🟡 🟢 ⚙ ⚪ ·  ★ ↓' ;;
+    *)
+      STYLE=glyph
+      glyphs='● ◆ ◐ ✓ ◌ ○ · ★ ↓'
+      ;;
+  esac
+  styles='fg=red fg=magenta fg=yellow fg=green dim dim dim fg=yellow dim'
+  opts=${opts#*"$US"}
+  set -f
+  # shellcheck disable=SC2086
+  set -- $glyphs
+  for name in $THEME_NAMES; do
+    g=$1
+    shift
+    # emoji: the unknown-state dot gets a second cell to match the width.
+    [ "$STYLE.$name" = emoji.none ] && g='· '
+    s=${styles%% *}
+    styles=${styles#* }
+    case $opts in
+      *"$US"*) [ -n "${opts%%"$US"*}" ] && s=${opts%%"$US"*} ;;
+      *) [ -n "$opts" ] && s=$opts ;;
+    esac
+    opts=${opts#*"$US"}
+    # A bare color (red, colour208, #ff8000) means fg=<color>.
+    case $s in
+      *=* | *,* | '' | bold | dim | italics | underscore | reverse) ;;
+      *) s="fg=$s" ;;
+    esac
+    # emoji carry their own colors; marks keep theirs.
+    case $STYLE.$name in
+      emoji.fav | emoji.side) ;;
+      emoji.*) s= ;;
+    esac
+    sgr "$s"
+    printf -v "G_$name" '%s' "$g"
+    printf -v "S_$name" '%s' "$s"
+    printf -v "A_$name" '%s' "$SGR"
+    j="$j${j:+,}\"$name\":{\"g\":\"$g\",\"a\":\"$SGR\"}"
+  done
+  set +f
+  TH_JSON="{$j}"
+}
+
+# paint NAME TEXT MODE: TEXT in NAME's style; MODE is tmux, ansi or plain.
+paint() {
+  local s a
+  s=$(eval "printf '%s' \"\${S_$1}\"")
+  a=$(eval "printf '%s' \"\${A_$1}\"")
+  case $3 in
+    tmux) [ -n "$s" ] && printf '#[%s]%s#[default]' "$s" "$2" || printf '%s' "$2" ;;
+    ansi) [ -n "$a" ] && printf '\033[%sm%s\033[0m' "$a" "$2" || printf '%s' "$2" ;;
+    *) printf '%s' "$2" ;;
+  esac
+}
+
+glyph() { eval "printf '%s' \"\${G_$1}\""; }
+
+# legend MODE: one line naming every state.
+legend() {
+  theme
+  local out='' name label
+  for name in perm ask idle 'done' running ready; do
+    case $name in
+      perm) label='needs permission' ;;
+      ask) label='asks a question' ;;
+      idle) label='waiting for input' ;;
+      done) label='finished' ;;
+      running) label='working' ;;
+      ready) label='ready/seen' ;;
+    esac
+    out="$out${out:+ · }$(paint "$name" "$(glyph "$name")" "$1") $label"
+  done
+  printf '%s\n' "$out"
+}
+
+# tmux_icon: the per-pane icon format for the status bar (ready shows
+# nothing). Commas in styles are escaped for the #{?...} conditionals.
+tmux_icon() {
+  theme
+  local out='' close='' name s
+  for name in perm ask idle 'done' running; do
+    s=$(paint "$name" "$(glyph "$name")" tmux)
+    out="$out#{?#{==:#{@surikat},$name},${s//,/#,} ,"
+    close="$close}"
+  done
+  printf '%s%s\n' "$out" "$close"
+}
+
+# tmux_mark: the favorite / sidelined format for prefix T.
+tmux_mark() {
+  theme
+  local f d
+  f=$(paint fav "$(glyph fav)" tmux)
+  d=$(paint side "$(glyph side)" tmux)
+  printf '#{?#{==:#{@surikat_mark},fav},%s,#{?#{==:#{@surikat_mark},side},%s,}}\n' "${f//,/#,}" "${d//,/#,}"
+}
 
 # shellcheck disable=SC2016
 JQ_DEFS='
 def pri: {"perm": 0, "ask": 0, "idle": 1, "done": 2, "running": 3, "ready": 4}[.state // ""] // 5;
-def icon: {"perm": "🔴", "ask": "❓", "idle": "🟡", "done": "🟢", "running": "⚙️", "ready": "⚪"}[.state // ""] // "· ";
-def age: ((now - (.since // now)) | if . < 0 then 0 else floor end) as $s
+# paint($a; $re): wrap in SGR $a when $ansi == "1"; $re re-applies the
+# row style (dim for sidelined rows) after the reset.
+def paint($a; $re): if $ansi == "1" and $a != "" then "\u001b[\($a)m\(.)\u001b[0m\($re)" else . end;
+def th($n): $th[$n] // $th.none;
+def icon($re): th(.state // "none") as $t | $t.g | paint($t.a; $re);
+def secs: (now - (.since // now)) | if . < 0 then 0 else floor end;
+# Waiting a while stands out: dim under 5m, plain under 1h, then bold red.
+def age_sgr: if pri > 2 then "2" else secs as $s
+  | if $s < 300 then "2" elif $s < 3600 then "" else "1;31" end end;
+def age: secs as $s
   | if $s < 60 then "\($s)s" elif $s < 3600 then "\($s / 60 | floor)m"
     elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
 def pad($n): if length >= $n then . else . + (" " * ($n - length)) end;
 def fit($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else pad($n) end;
 def cut($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else . end;
-def ordered: sort_by(pri, (.since // 0));
+def mark($m): {"fav": 0, "side": 2}[$m[.pane // ""] // ""] // 1;
+def mark_icon($m; $re): mark($m) as $k
+  | if $k == 1 then " " else th(["fav", "", "side"][$k]) as $t | $t.g | paint($t.a; $re) end;
+def ordered($m; $order):
+  sort_by(pri, mark($m), (.since // 0) * (if $order == "desc" then 1 else -1 end));
 '
 
 # Record files, or nothing (bash 3.2: no nullglob tricks needed).
@@ -76,19 +250,25 @@ jq_records() {
   [ -n "$out" ] && echo
 }
 
-# Sets SOCKET and LIVE (" %1 %2 ... ") for the current tmux server.
-SOCKET='' LIVE=''
+# Sets SOCKET, LIVE (" %1 %2 ... "), SIDE (sidelined panes, same format)
+# and MARKS (JSON {"%1": "fav", ...}) for the current tmux server.
+SOCKET='' LIVE='' SIDE='' MARKS='{}'
 load_live() {
-  SOCKET='' LIVE=" "
-  local out s p
-  out=$(tmux list-panes -a -F "#{socket_path}${US}#{pane_id}" 2>/dev/null) || return 0
-  while IFS=$US read -r s p; do
+  SOCKET='' LIVE=" " SIDE=" " MARKS='{}'
+  local out s p m j=''
+  out=$(tmux list-panes -a -F "#{socket_path}${US}#{pane_id}${US}#{@surikat_mark}" 2>/dev/null) || return 0
+  while IFS=$US read -r s p m; do
     [ -n "$p" ] || continue
     SOCKET=$s
     LIVE="$LIVE$p "
+    case $m in
+      fav | side) j="$j${j:+,}\"$p\":\"$m\"" ;;
+    esac
+    [ "$m" = side ] && SIDE="$SIDE$p "
   done <<EOF
 $out
 EOF
+  MARKS="{$j}"
 }
 
 pane_live() {
@@ -98,8 +278,26 @@ pane_live() {
   return 1
 }
 
+pane_side() {
+  case $SIDE in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Wait-time direction: asc (shortest wait first, the default) or desc.
+default_order() {
+  local o=${SURIKAT_ORDER:-}
+  [ -n "$o" ] || o=$(tmux show -gv @surikat_order 2>/dev/null)
+  case $o in
+    desc) echo desc ;;
+    *) echo asc ;;
+  esac
+}
+
 # GC: drop a record whose pane is gone (only judged for this tmux server,
-# see L7), whose Claude process is dead, or that is stale. Sets COUNTS.
+# see L7), whose Claude process is dead, or that is stale. Sets COUNTS
+# (without sidelined panes of this server).
 COUNTS=
 gc() {
   load_live
@@ -135,7 +333,7 @@ gc() {
       if [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_live "$pane"; then
         tmux set -pu -t "$pane" @surikat 2>/dev/null
       fi
-    else
+    elif ! { [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_side "$pane"; }; then
       COUNTS="$COUNTS $state"
     fi
   done <<EOF
@@ -143,18 +341,14 @@ $lines
 EOF
 }
 
+# summary [MODE]: e.g. "●2 ✓1"; MODE tmux (default), ansi or plain.
 summary() {
-  local out='' s n icon x
+  local mode=${1:-tmux} out='' s n x
+  theme
   for s in perm ask idle 'done'; do
-    case $s in
-      perm) icon=🔴 ;;
-      ask) icon=❓ ;;
-      idle) icon=🟡 ;;
-      done) icon=🟢 ;;
-    esac
     n=0
     for x in $COUNTS; do [ "$x" = "$s" ] && n=$((n + 1)); done
-    [ $n -gt 0 ] && out="$out${out:+ }$icon$n"
+    [ $n -gt 0 ] && out="$out${out:+ }$(paint "$s" "$(glyph "$s")$n" "$mode")"
   done
   [ -n "$out" ] && printf '%s\n' "$out"
   return 0
@@ -167,21 +361,34 @@ width() {
   echo "$w"
 }
 
-# pane<TAB>icon age target window project message, sorted by urgency.
-# With a socket, only records of that tmux server (jumpable ones).
+# pane<TAB>mark icon age target window project message, sorted as described
+# at the top. With a socket, only records of that tmux server (jumpable
+# ones). Needs load_live (MARKS). ROWS_ANSI=1 dims sidelined rows.
 rows() {
-  local sock=${1:-} w
+  local sock=${1:-} order=${2:-} w
   w=$(width)
+  [ -n "$order" ] || order=$(default_order)
+  theme
   # shellcheck disable=SC2016
-  jq_records -r -s --arg sock "$sock" --argjson w "$w" "$JQ_DEFS"'
-    ($w - 45) as $mw
-    | map(select($sock == "" or (.socket // "") == $sock)) | ordered | .[]
+  jq_records -r -s --arg sock "$sock" --argjson w "$w" --argjson marks "$MARKS" \
+    --arg order "$order" --arg ansi "${ROWS_ANSI:-0}" --argjson th "$TH_JSON" "$JQ_DEFS"'
+    ($w - 47) as $mw
+    | map(select($sock == "" or (.socket // "") == $sock)) | ordered($marks; $order) | .[]
     | ((.message // "") | if . == "" then "" else . end) as $m
     | (if $m == "" then (.prompt // "") else $m end) as $msg
-    | "\(.pane // "")\t\(icon) \(age | fit(4)) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))"'
+    | (mark($marks) == 2) as $side
+    | (if $side and $ansi == "1" then "\u001b[2m" else "" end) as $re
+    | age_sgr as $as
+    | (age | fit(4) | if $side then . else paint($as; $re) end) as $age
+    | "\(mark_icon($marks; $re)) \(icon($re)) \($age) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))" as $line
+    | "\(.pane // "")\t" + (if $re != "" then "\($re)\($line)\u001b[0m" else $line end)'
 }
 
-table() { rows | cut -f2-; }
+table() {
+  local a=${ROWS_ANSI:-0}
+  [ -t 1 ] && a=1
+  ROWS_ANSI=$a rows | cut -f2-
+}
 
 # Sets CLIENT (name) and CUR (its current pane). Uses --client if given and
 # attached, else the most recently active client, else the server's
@@ -258,8 +465,9 @@ next() {
   ctx
   local queue
   # shellcheck disable=SC2016
-  queue=$(jq_records -r -s --arg sock "$SOCKET" "$JQ_DEFS"'
-    map(select(pri <= 2 and (.pane // "") != "" and (.socket // "") == $sock)) | ordered
+  queue=$(jq_records -r -s --arg sock "$SOCKET" --argjson marks "$MARKS" "$JQ_DEFS"'
+    map(select(pri <= 2 and mark($marks) < 2 and (.pane // "") != "" and (.socket // "") == $sock))
+    | ordered($marks; "desc")
     | (reduce .[].pane as $p ([]; if any(.[]; . == $p) then . else . + [$p] end)) as $panes
     | $panes[]')
   if [ -z "$queue" ]; then
@@ -337,6 +545,53 @@ $files
 EOF
 }
 
+# toggle_mark fav|side [PANE]: set the mark, or clear it if already set.
+toggle_mark() {
+  local kind=$1 pane=${2:-}
+  if [ -z "$pane" ]; then
+    ctx
+    pane=$CUR
+  fi
+  pane_exists "$pane" || {
+    msg "that pane no longer exists"
+    return 1
+  }
+  if [ "$(tmux display -p -t "$pane" '#{@surikat_mark}' 2>/dev/null)" = "$kind" ]; then
+    tmux set -pu -t "$pane" @surikat_mark
+  else
+    tmux set -p -t "$pane" @surikat_mark "$kind"
+  fi
+}
+
+# The picker's state file holds its current wait-time order.
+state_order() {
+  local o
+  o=$(cat "$1" 2>/dev/null)
+  case $o in
+    asc | desc) echo "$o" ;;
+    *) default_order ;;
+  esac
+}
+
+flip() {
+  case $(state_order "$1") in
+    asc) echo desc >"$1" ;;
+    *) echo asc >"$1" ;;
+  esac
+}
+
+header() {
+  local o
+  case $(state_order "$1") in
+    asc) o='shortest wait first' ;;
+    *) o='longest wait first' ;;
+  esac
+  theme
+  printf '%s\n%s\n%s\n' "$(legend ansi)" \
+    "ctrl-f: $(paint fav "$(glyph fav)" ansi) favorite · ctrl-l: $(paint side "$(glyph side)" ansi) sideline · ctrl-o: order ($o)" \
+    'enter: jump · ctrl-x: mark seen · ctrl-r: reload · esc: close'
+}
+
 preview() {
   local pane=$1 lines n esc
   lines=${FZF_PREVIEW_LINES:-${LINES:-40}}
@@ -363,15 +618,26 @@ picker() {
   }
   gc
   ctx
-  local w out key sel q="'$SELF'"
+  local w out key sel q="'$SELF'" st s reload
+  st=$(mktemp "${TMPDIR:-/tmp}/surikat.XXXXXX") || return 1
+  # shellcheck disable=SC2064
+  trap "rm -f '$st'" EXIT
+  default_order >"$st"
+  s="'$st'"
+  reload="reload($q --rows --state $s)"
   w=$(width)
-  out=$(SURIKAT_WIDTH=$((w - 2)) rows "$SOCKET" |
-    SURIKAT_WIDTH=$((w - 2)) fzf --ansi --no-sort --reverse --delimiter=$'\t' --with-nth=2.. \
-      --header="$LEGEND"$'\n''enter: jump · ctrl-x: mark seen · ctrl-r: reload · esc: close' \
+  out=$(SURIKAT_WIDTH=$((w - 2)) ROWS_ANSI=1 rows "$SOCKET" "$(state_order "$st")" |
+    SURIKAT_WIDTH=$((w - 2)) fzf --ansi --no-sort --reverse --cycle --track --id-nth=1 \
+      --delimiter=$'\t' --with-nth=2.. \
+      --header="$(header "$st")" \
       --expect=enter --preview="$q --preview {1}" \
       --preview-window='down,60%,follow,border-top' \
-      --bind="ctrl-r:reload($q --rows)" \
-      --bind="ctrl-x:execute-silent($q --seen {1})+reload($q --rows)")
+      --bind="ctrl-r:$reload" \
+      --bind="ctrl-x:execute-silent($q --seen {1})+$reload" \
+      --bind="ctrl-f:execute-silent($q --fav {1})+$reload" \
+      --bind="ctrl-l:execute-silent($q --side {1})+$reload" \
+      --bind="ctrl-o:execute-silent($q --flip $s)+transform-header($q --header $s)+$reload")
+  rm -f "$st"
   key=${out%%$'\n'*}
   sel=${out#*$'\n'}
   [ "$key" = enter ] && [ "$sel" != "$out" ] || return 0
@@ -385,15 +651,15 @@ watch_loop() {
   while :; do
     gc
     buf=$(
-      printf 'surikat · %s   %s\n%s\n\n' "$(date +%H:%M:%S)" "$(summary)" "$LEGEND"
-      table
+      printf 'surikat · %s   %s\n%s\n\n' "$(date +%H:%M:%S)" "$(summary ansi)" "$(legend ansi)"
+      ROWS_ANSI=1 table
     )
     printf '\033[H\033[2J%s\n' "$buf"
     sleep "$s"
   done
 }
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --client NAME may appear anywhere.
 args=()
@@ -415,14 +681,25 @@ case ${1:-} in
   "") picker ;;
   --next) next ;;
   --back) back ;;
-  --count) gc && summary ;;
+  --count)
+    gc
+    if [ -t 1 ]; then summary ansi; else summary tmux; fi
+    ;;
+  --tmux-icon) tmux_icon ;;
+  --tmux-mark) tmux_mark ;;
   --list) gc && table ;;
   --watch) watch_loop "${2:-}" ;;
   --gc) gc ;;
   --rows)
     load_live
-    rows "$SOCKET"
+    order=
+    [ "${2:-}" = --state ] && order=$(state_order "${3:?file}")
+    ROWS_ANSI=1 rows "$SOCKET" "$order"
     ;;
+  --header) header "${2:?file}" ;;
+  --flip) flip "${2:?file}" ;;
+  --fav) toggle_mark fav "${2:-}" ;;
+  --side) toggle_mark side "${2:-}" ;;
   --preview) preview "${2:?pane}" ;;
   --seen) seen "${2:?pane}" ;;
   --jump)

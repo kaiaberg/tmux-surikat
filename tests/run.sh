@@ -190,9 +190,9 @@ echo "--- tmux"
 reset_state
 hook perm "$P1" "$(js w1 '{tool_name: "Bash", tool_input: {command: "x"}}')"
 hook stop "$P2" "$(js w2)"
-check "two Claude panes in one window show both icons" eq "$(tmux display -p -t "$P1" '#{E:@surikat_window_icons}')" "🔴 🟢 "
+check "two Claude panes in one window show both icons" eq "$(tmux display -p -t "$P1" '#{E:@surikat_window_icons}')" "#[fg=red]●#[default] #[fg=green]✓#[default] "
 hook prompt "$P2" "$(js w2)"
-check "gear for running" eq "$(tmux display -p -t "$P1" '#{E:@surikat_window_icons}')" "🔴 ⚙ "
+check "dim ring for running" eq "$(tmux display -p -t "$P1" '#{E:@surikat_window_icons}')" "#[fg=red]●#[default] #[dim]◌#[default] "
 check "icons prepended to window-status-format" eq "$(tmux show -gv window-status-format | cut -c1-26)" '#{E:@surikat_window_icons}'
 "$BIN/surikat-tmux"
 "$BIN/surikat-tmux"
@@ -201,10 +201,12 @@ check "re-applying doesn't duplicate icons" eq "$n" 1
 n=$(tmux show -gv status-right | grep -o 'surikat --count' | wc -l | tr -d ' ')
 check "re-applying doesn't duplicate the summary" eq "$n" 1
 check "status-right-length raised" eq "$(tmux show -gv status-right-length)" 80
+tmux set -p -t "$P1" @surikat_mark fav
 "$BIN/surikat-tmux" --remove
 check "--remove restores window-status-format" eq "$(tmux show -gv window-status-format)" "$("$REAL_TMUX" -L test-pristine -f /dev/null start-server \; show -gv window-status-format \; kill-server 2>/dev/null)"
 check "--remove restores status-right-length" eq "$(tmux show -gv status-right-length)" 40
 check "--remove unsets pane options" eq "$(popt "$P1")" ""
+check "--remove unsets marks" eq "$(tmux display -p -t "$P1" '#{@surikat_mark}')" ""
 "$BIN/surikat-tmux"
 
 echo "--- surikat"
@@ -217,12 +219,91 @@ hook start "" "$(js n1)"
 setf p1 '.since = 1000'
 setf p2 '.since = 2000'
 setf d1 '.since = 500'
-check "--count" eq "$("$BIN/surikat" --count)" "🔴2 🟢1"
+check "--count with tmux styles" eq "$("$BIN/surikat" --count)" "#[fg=red]●2#[default] #[fg=green]✓1#[default]"
 order=$("$BIN/surikat" --list | awk '{print $1}' | tr '\n' ' ')
-check "sorted by priority" eq "$order" "🔴 🔴 🟢 ⚙️ ⚪ "
+check "sorted by priority" eq "$order" "● ● ✓ ◌ ○ "
 first=$("$BIN/surikat" --rows | head -n 1 | cut -f1)
-check "oldest first within a state" eq "$first" "$P1"
+check "shortest wait first within a state by default" eq "$first" "$P2"
+first=$(SURIKAT_ORDER=desc "$BIN/surikat" --rows | head -n 1 | cut -f1)
+check "SURIKAT_ORDER=desc: longest wait first" eq "$first" "$P1"
+tmux set -g @surikat_order desc
+first=$("$BIN/surikat" --rows | head -n 1 | cut -f1)
+check "@surikat_order desc: longest wait first" eq "$first" "$P1"
+tmux set -gu @surikat_order
 check "message falls back to the prompt" sh -c "'$BIN/surikat' --list | grep -q 'working on it'"
+
+echo "--- theme"
+check "age: dim when fresh" sh -c "'$BIN/surikat' --rows | grep -q \"^$P3	  $(printf '\033')\\[32m✓$(printf '\033')\\[0m $(printf '\033')\\[1;31m\""
+setf d1 ".since = $(($(date +%s) - 10))"
+check "age: bold red after an hour, dim when fresh" sh -c "'$BIN/surikat' --rows | grep \"^$P3	\" | grep -q \"$(printf '\033')\\[2m10s\""
+setf d1 '.since = 500'
+check "--list without a tty has no escapes" sh -c "! '$BIN/surikat' --list | grep -q \"$(printf '\033')\""
+check "emoji style" eq "$(SURIKAT_STYLE=emoji "$BIN/surikat" --list | awk '{print $1}' | tr '\n' ' ')" "🔴 🔴 🟢 ⚙ ⚪ "
+check "emoji style: --count without styles" eq "$(SURIKAT_STYLE=emoji "$BIN/surikat" --count)" "🔴2 🟢1"
+check "nerd style" eq "$(SURIKAT_STYLE=nerd "$BIN/surikat" --list | head -n 1 | awk '{print $1}')" "$(printf '\357\200\243')"
+tmux set -g @surikat_color_perm 'fg=colour208,bold'
+check "color override as a tmux style" eq "$("$BIN/surikat" --count)" "#[fg=colour208,bold]●2#[default] #[fg=green]✓1#[default]"
+check "color override in ANSI" sh -c "'$BIN/surikat' --rows | head -n 1 | grep -q \"$(printf '\033')\\[38;5;208;1m●\""
+tmux set -g @surikat_color_perm '#ff8000'
+check "hex colors in ANSI" sh -c "'$BIN/surikat' --header /nonexistent | head -n 1 | grep -q \"$(printf '\033')\\[38;2;255;128;0m●\""
+"$BIN/surikat-tmux"
+tmux set -g @surikat_color_perm 'fg=red,bold'
+"$BIN/surikat-tmux"
+check "re-applying picks up a new style, commas escaped" eq "$(tmux display -p -t "$P1" '#{E:@surikat_pane_icon}')" "#[fg=red,bold]●#[default] "
+tmux set -gu @surikat_color_perm
+tmux set -g @surikat_style emoji
+"$BIN/surikat-tmux"
+check "@surikat_style emoji in the status bar" eq "$(tmux display -p -t "$P1" '#{E:@surikat_pane_icon}')" "🔴 "
+tmux set -gu @surikat_style
+"$BIN/surikat-tmux"
+
+echo "--- marks"
+mopt() { tmux display -p -t "$1" '#{@surikat_mark}'; }
+panes() { "$BIN/surikat" --rows "$@" | cut -f1 | tr '\n' ' '; }
+"$BIN/surikat" --fav "$P1"
+check "--fav sets the pane option" eq "$(mopt "$P1")" fav
+check "favorite first within a state" eq "$(panes)" "$P1 $P2 $P3 $P4 "
+check "favorite shows a star" sh -c "'$BIN/surikat' --list | head -n 1 | grep -q '^★ ●'"
+"$BIN/surikat" --fav "$P3"
+check "favorite doesn't beat urgency" eq "$(panes)" "$P1 $P2 $P3 $P4 "
+"$BIN/surikat" --fav "$P1"
+check "--fav again clears the mark" eq "$(mopt "$P1")" ""
+"$BIN/surikat" --fav "$P3"
+"$BIN/surikat" --side "$P2"
+check "--side sets the pane option" eq "$(mopt "$P2")" side
+check "sidelined last within a state" eq "$(panes)" "$P1 $P2 $P3 $P4 "
+e=$(printf '\033')
+check "sidelined rows are dimmed" sh -c "'$BIN/surikat' --rows | grep -q \"^$P2	$e\\[2m$e\\[2m↓$e\\[0m$e\\[2m \""
+check "sidelined panes aren't counted" eq "$("$BIN/surikat" --count)" "#[fg=red]●1#[default] #[fg=green]✓1#[default]"
+check "tree pane icon with mark" eq "$(tmux display -p -t "$P2" '#{E:@surikat_tree_pane_icon}')" "#[dim]↓#[default]#[fg=red]●#[default] "
+"$BIN/surikat" --fav "$P1"
+check "tree window icons with marks" eq "$(tmux display -p -t "$P1" '#{E:@surikat_tree_window_icons}')" "#[fg=yellow]★#[default]#[fg=red]●#[default] #[dim]↓#[default]#[fg=red]●#[default] "
+check "status bar icons without marks" eq "$(tmux display -p -t "$P1" '#{E:@surikat_window_icons}')" "#[fg=red]●#[default] #[fg=red]●#[default] "
+"$BIN/surikat" --fav "$P2"
+check "--fav replaces sidelined" eq "$(mopt "$P2")" fav
+"$BIN/surikat" --fav "$P1"
+"$BIN/surikat" --fav "$P2"
+st=$T/order
+echo desc >"$st"
+check "--rows --state follows the state file" eq "$(panes --state "$st")" "$P1 $P2 $P3 $P4 "
+"$BIN/surikat" --fav "$P2"
+check "--rows --state desc keeps favorites first" eq "$(panes --state "$st" | cut -d' ' -f1)" "$P2"
+"$BIN/surikat" --flip "$st"
+check "--flip toggles the order" eq "$(cat "$st")" asc
+check "--header names the order" sh -c "'$BIN/surikat' --header '$st' | grep -q 'shortest wait first'"
+tmux select-window -t "$P4"
+tmux select-pane -t "$P4"
+"$BIN/surikat" --side
+check "--side without a pane marks the current one" eq "$(mopt "$P4")" side
+"$BIN/surikat" --side
+"$BIN/surikat" --side "$P2"
+tmux select-pane -t "$P3"
+"$BIN/surikat" --next
+check "--next skips sidelined sessions" eq "$(cur)" "$P1"
+"$BIN/surikat" --next
+check "--next: favorite before the rest of its state" eq "$(cur)" "$P3"
+rm -f "$SURIKAT_DIR"/.trail-*
+for p in "$P1" "$P2" "$P3" "$P4"; do tmux set -pu -t "$p" @surikat_mark; done
 
 tmux select-window -t "$P4"
 tmux select-pane -t "$P4"
@@ -325,6 +406,16 @@ if command -v fzf >/dev/null; then
     tmux capture-pane -p -t "$1" 2>/dev/null | sed 's/^/     | /'
     return 1
   }
+  # wait_re PANE REGEX: like wait_for, with an extended regex.
+  wait_re() {
+    local i=0
+    while [ $i -lt 50 ]; do
+      tmux capture-pane -p -t "$1" 2>/dev/null | grep -qE "$2" && return 0
+      sleep 0.1
+      i=$((i + 1))
+    done
+    return 1
+  }
   # open_picker: run the dashboard in a new window, print its pane id.
   open_picker() {
     tmux new-window -P -F '#{pane_id}' -t main \
@@ -356,6 +447,30 @@ if command -v fzf >/dev/null; then
   done
   check "ctrl-x marks the session as seen" eq "$(field f2 state)" ready
   check "ctrl-x leaves the picker open" wait_for "$PK" "ready/seen"
+  wait_re "$PK" '○ +[0-9]+s +main' >/dev/null # the reload is done
+  tmux send-keys -t "$PK" Down C-f # bottom row: Down wraps to the top
+  i=0
+  while [ "$(tmux display -p -t "$P1" '#{@surikat_mark}')" != fav ] && [ $i -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  check "selection is cyclic; ctrl-f marks a favorite" eq "$(tmux display -p -t "$P1" '#{@surikat_mark}')" fav
+  check "favorite shows a star in the picker" wait_for "$PK" "★ ●"
+  check "picker header shows the default order" wait_for "$PK" "shortest wait first"
+  tmux send-keys -t "$PK" C-o
+  check "ctrl-o toggles the order" wait_for "$PK" "longest wait first"
+  # The header changes before the reload; keys sent during a reload are
+  # undone when --track restores the cursor, so let it finish.
+  sleep 0.5
+  tmux send-keys -t "$PK" Up C-l # top row: Up wraps to the bottom
+  i=0
+  while [ "$(tmux display -p -t "$P3" '#{@surikat_mark}')" != side ] && [ $i -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  check "ctrl-l sidelines a session" eq "$(tmux display -p -t "$P3" '#{@surikat_mark}')" side
+  tmux set -pu -t "$P1" @surikat_mark
+  tmux set -pu -t "$P3" @surikat_mark
   tmux send-keys -t "$PK" Escape
   i=0
   while pane_alive=$(tmux display -p -t "$PK" '#{pane_id}' 2>/dev/null) &&

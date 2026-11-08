@@ -10,7 +10,13 @@
 set -u
 
 WIN='#{E:@surikat_window_icons}'
-ICON='#{?#{==:#{@surikat},perm},🔴 ,#{?#{==:#{@surikat},ask},❓ ,#{?#{==:#{@surikat},idle},🟡 ,#{?#{==:#{@surikat},done},🟢 ,#{?#{==:#{@surikat},running},⚙ ,}}}}}'
+# The icon formats come from surikat's theme (@surikat_style and
+# @surikat_color_*), so they are defined in one place.
+here=$(cd "$(dirname "$0")" && pwd)
+ICON=$("$here/surikat" --tmux-icon 2>/dev/null)
+MARK=$("$here/surikat" --tmux-mark 2>/dev/null)
+[ -n "$ICON" ] || ICON='#{?#{==:#{@surikat},perm},🔴 ,#{?#{==:#{@surikat},ask},❓ ,#{?#{==:#{@surikat},idle},🟡 ,#{?#{==:#{@surikat},done},🟢 ,#{?#{==:#{@surikat},running},⚙ ,}}}}}'
+[ -n "$MARK" ] || MARK='#{?#{==:#{@surikat_mark},fav},★,#{?#{==:#{@surikat_mark},side},↓,}}'
 
 # Where `surikat` lives, as tmux should call it from status-right. Keep a
 # literal ~ for paths under $HOME so the format stays readable and portable.
@@ -32,7 +38,10 @@ strip_count() { sed 's| #([^)]*/surikat --count)||g'; }
 
 apply() {
   tmux set -g @surikat_pane_icon "$ICON" \; \
-    set -g @surikat_window_icons '#{P:#{E:@surikat_pane_icon}}'
+    set -g @surikat_window_icons '#{P:#{E:@surikat_pane_icon}}' \; \
+    set -g @surikat_mark_icon "$MARK" \; \
+    set -g @surikat_tree_pane_icon '#{E:@surikat_mark_icon}#{E:@surikat_pane_icon}' \; \
+    set -g @surikat_tree_window_icons '#{P:#{E:@surikat_tree_pane_icon}}'
 
   local o v n
   for o in window-status-format window-status-current-format; do
@@ -82,12 +91,14 @@ remove() {
   [ -n "$v" ] && tmux set -g status-interval "$v"
 
   tmux set -gu @surikat_pane_icon \; set -gu @surikat_window_icons \; \
+    set -gu @surikat_mark_icon \; set -gu @surikat_tree_pane_icon \; \
+    set -gu @surikat_tree_window_icons \; \
     set -gu @surikat_orig_status_right_length \; set -gu @surikat_orig_status_interval \; \
     bind C customize-mode -Z \; unbind N \; unbind P \; unbind T
 
   local p
   for p in $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null); do
-    tmux set -pu -t "$p" @surikat 2>/dev/null
+    tmux set -pu -t "$p" @surikat \; set -pu -t "$p" @surikat_mark 2>/dev/null
   done
 }
 

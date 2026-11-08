@@ -9,8 +9,11 @@ bar, lets you jump to the next waiting session with one key, and gives you a
 popup dashboard with a live preview.
 
 ```
- 🔴 🟢 3:api   ⚙ 4:web   5:notes                          🔴1 🟢1  14:02
+ ● ✓ 3:api   ◌ 4:web   5:notes                              ●1 ✓1  14:02
 ```
+
+The glyphs are colored (red, green, dim, …); see [Look](#look) for Nerd
+Font icons, emoji and your own colors.
 
 This is **not a TPM plugin**. It installs with `./install.sh`, which also adds
 hooks to Claude Code's settings (`~/.claude/settings.json`). Everything is
@@ -20,27 +23,81 @@ backed up first and `./install.sh --uninstall` reverses it.
 
 | Key / command | What it does |
 |---|---|
-| status bar | An icon per Claude pane in front of each window name, e.g. `🔴 🟢 3:api`. |
-| `status-right` | A summary such as `🔴2 ❓1 🟡1 🟢5`; empty when nothing is waiting. |
-| `prefix C` | Dashboard popup (fzf): sessions sorted by urgency, live pane preview. `enter` jumps, `ctrl-x` marks 🟢/🟡 as seen, `ctrl-r` reloads, `esc` closes. |
-| `prefix N` | Jump to the most urgent, longest-waiting session. Press again for the next one (wraps around). |
+| status bar | An icon per Claude pane in front of each window name, e.g. `● ✓ 3:api`. |
+| `status-right` | A summary such as `●2 ◆1 ◐1 ✓5`; empty when nothing is waiting. |
+| `prefix C` | Dashboard popup (fzf): sessions [sorted](#sort-order), live pane preview. `enter` jumps, `ctrl-f` toggles ★ favorite, `ctrl-l` toggles ↓ sidelined, `ctrl-o` flips the wait-time order, `ctrl-x` marks ✓/◐ as seen, `ctrl-r` reloads, `esc` closes. The selection wraps around at the top and bottom. |
+| `prefix N` | Jump to the most urgent, longest-waiting session, skipping sidelined ones. Press again for the next one (wraps around). |
 | `prefix P` | Jump back along your trail (last 20 jumps), skipping panes that are gone. |
-| `prefix T` | `choose-tree` with icons. `prefix w` stays the stock tree. |
+| `prefix T` | `choose-tree` with icons and ★/↓ marks. `prefix w` stays the stock tree. |
 | `surikat --watch` | Full-screen live table, e.g. for a dedicated window. |
 | `surikat --list` / `--count` / `--gc` | Print the table, print the summary, clean up. |
+| `surikat --fav` / `--side [PANE]` | Toggle a pane (default: the current one) as favorite / sidelined. |
 
 ### States
 
-| Icon | State | Meaning |
-|---|---|---|
-| 🔴 | `perm` | Waiting for a permission approval |
-| ❓ | `ask` | Claude asked you a question |
-| 🟡 | `idle` | Waiting after an interrupt (Esc) or an API error |
-| 🟢 | `done` | Turn finished, waiting for a follow-up |
-| ⚙ | `running` | Working |
-| ⚪ | `ready` | New session, or marked as seen (dashboard only) |
+| Glyph | Emoji | State | Meaning |
+|---|---|---|---|
+| `●` red | 🔴 | `perm` | Waiting for a permission approval |
+| `◆` magenta | ❓ | `ask` | Claude asked you a question |
+| `◐` yellow | 🟡 | `idle` | Waiting after an interrupt (Esc) or an API error |
+| `✓` green | 🟢 | `done` | Turn finished, waiting for a follow-up |
+| `◌` dim | ⚙ | `running` | Working |
+| `○` dim | ⚪ | `ready` | New session, or marked as seen (dashboard only) |
 
-`prefix N` visits 🔴/❓ first, then 🟡, then 🟢, oldest wait first.
+`prefix N` visits ●/◆ first, then ◐, then ✓, oldest wait first.
+
+In the dashboard the wait time is dim for the first 5 minutes and turns bold
+red after an hour.
+
+### Look
+
+Set these in `~/.tmux.conf` *before* the `source-file … surikat.conf` line,
+or reload the config after changing them:
+
+```tmux
+set -g @surikat_style glyph        # glyph (default), nerd or emoji
+set -g @surikat_color_perm 'fg=red,bold'
+set -g @surikat_color_done colour108
+```
+
+- `glyph` uses plain Unicode shapes and works with any font.
+- `nerd` uses Nerd Font icons (lock, question, pause, check, cog, circle).
+  Without a Nerd Font they show as boxes.
+- `emoji` is the old look; colors don't apply to it.
+
+Colors are tmux styles (`fg=…`, `bold`, `dim`, …) or a bare color (`red`,
+`brightblue`, `colour208`, `#ff8000`). The names are `perm`, `ask`, `idle`,
+`done`, `running`, `ready` and the marks `fav` and `side`. The 16 named colors
+follow your terminal's color scheme. The dashboard turns them into ANSI
+colors, so a color override applies there too.
+
+### Sort order
+
+The dashboard, `--list` and `--watch` sort by:
+
+1. urgency: ●/◆ → ◐ → ✓ → ◌ → ○
+2. mark: ★ favorite → unmarked → ↓ sidelined (shown dimmed)
+3. wait time: shortest first by default
+
+Only the wait-time direction can change. `ctrl-o` flips it while the
+dashboard is open, and the default is set in `~/.tmux.conf`:
+
+```tmux
+set -g @surikat_order desc   # longest wait first (default: asc)
+```
+
+`prefix N` always goes oldest first, favorites before unmarked sessions
+within a state. Sidelined sessions are skipped by `prefix N` and not counted
+in `status-right`.
+
+Marks are kept as a pane option (`@surikat_mark`), so they survive `/clear`
+and restarting Claude in the same pane, but not a tmux server restart. To mark
+the current pane without opening the dashboard, bind keys of your own, e.g.:
+
+```tmux
+bind F run-shell "~/.local/bin/surikat --fav '#{pane_id}'"
+bind S run-shell "~/.local/bin/surikat --side '#{pane_id}'"
+```
 
 ## Requirements
 
@@ -109,13 +166,13 @@ tmux (surikat.conf → surikat-tmux)
 
 | Claude Code event | Hook argument | Effect |
 |---|---|---|
-| `SessionStart` | `start` | ⚪ (a compaction keeps the current state) |
-| `UserPromptSubmit` | `prompt` | ⚙, remembers the prompt |
-| `PostToolUse`, `PostToolUseFailure` | `tool` | ⚙ (a subagent's tool doesn't clear a pending 🔴/❓) |
-| `PermissionRequest` | `perm` | 🔴, or ❓ for `AskUserQuestion` |
-| `Notification` | `notify` | 🔴 for permission prompts; 🟡 for `idle_prompt` after an interrupt |
-| `Stop` | `stop` | 🟢 |
-| `StopFailure` | `fail` | 🟡 |
+| `SessionStart` | `start` | ○ (a compaction keeps the current state) |
+| `UserPromptSubmit` | `prompt` | ◌, remembers the prompt |
+| `PostToolUse`, `PostToolUseFailure` | `tool` | ◌ (a subagent's tool doesn't clear a pending ●/◆) |
+| `PermissionRequest` | `perm` | ●, or ◆ for `AskUserQuestion` |
+| `Notification` | `notify` | ● for permission prompts; ◐ for `idle_prompt` after an interrupt |
+| `Stop` | `stop` | ✓ |
+| `StopFailure` | `fail` | ◐ |
 | `SessionEnd` | `end` | removes the record |
 
 State lives in `${XDG_STATE_HOME:-~/.local/state}/surikat/<short-hostname>/`,
@@ -136,7 +193,9 @@ shellcheck bin/* install.sh tests/*.sh
 
 The tests never touch your real tmux server or state. Environment overrides
 for experiments: `SURIKAT_DIR` (state dir), `SURIKAT_STALE_HOURS`,
-`SURIKAT_INTERVAL` (`--watch`), `SURIKAT_BIN` (path used in status-right).
+`SURIKAT_INTERVAL` (`--watch`), `SURIKAT_BIN` (path used in status-right),
+`SURIKAT_ORDER` (`asc`/`desc`, overrides `@surikat_order`), `SURIKAT_STYLE`
+(overrides `@surikat_style`).
 
 Portability rules for contributors: bash 3.2, no `/proc`, no GNU-only tool
 flags (`sed -i`, `readlink -f`, `stat -c`, `date -d`, `timeout`, …), and keep
@@ -146,12 +205,12 @@ See [TESTING.md](TESTING.md) for the manual checklist.
 
 ## Known limitations
 
-- A denied permission request has no event of its own; 🔴 clears with the
+- A denied permission request has no event of its own; ● clears with the
   next tool event, prompt or turn end.
-- After an interrupt (Esc), Claude Code sends no `Stop`; the session turns 🟡
+- After an interrupt (Esc), Claude Code sends no `Stop`; the session turns ◐
   only when the `idle_prompt` notification arrives about 60s later.
 - While a permission dialog is open, a parallel main-agent tool finishing can
-  clear 🔴 for a few seconds until the permission notification sets it again.
+  clear ● for a few seconds until the permission notification sets it again.
 - The dashboard doesn't auto-refresh (`ctrl-r` reloads; use `surikat
   --watch` for a live view), because refreshing fzf 0.29 can make Enter jump
   to the wrong row.
