@@ -1,0 +1,49 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.04: the minimums (tmux 3.2a, jq 1.6, fzf 0.29).
+        # latest: newer distro versions (fzf 0.44).
+        os: [ubuntu-22.04, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux jq fzf shellcheck zsh fish
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tmux jq fzf shellcheck
+
+      - name: Versions
+        run: |
+          tmux -V; jq --version; fzf --version; bash --version | head -n 1
+
+      - name: shellcheck
+        run: shellcheck bin/* install.sh tests/*.sh surikat.tmux
+
+      - name: Tests
+        if: runner.os == 'Linux'
+        run: |
+          tests/run.sh
+          tests/sandbox-install.sh
+
+      # macOS: run with /bin/bash 3.2, the oldest bash surikat supports.
+      - name: Tests (bash 3.2)
+        if: runner.os == 'macOS'
+        run: |
+          export PATH="/bin:$PATH"
+          bash --version | head -n 1
+          tests/run.sh
+          tests/sandbox-install.sh
