@@ -1,0 +1,11 @@
+{
+  "name": "surikat",
+  "displayName": "surikat",
+  "description": "Shows which Claude Code sessions need you, in the tmux status bar. Needs the tmux side too (TPM or install.sh).",
+  "version": "0.1.0",
+  "author": { "name": "Kaia Berg" },
+  "homepage": "https://github.com/kaiaberg/tmux-surikat",
+  "repository": "https://github.com/kaiaberg/tmux-surikat",
+  "license": "MIT",
+  "keywords": ["tmux", "status", "hooks", "sessions"]
+}

@@ -284,6 +284,14 @@ strip
 | .hooks = (reduce $ev[] as $e (.hooks // {};
     .[$e[0]] = ((.[$e[0]] // []) + [{hooks: [{type: "command", command: ($cmd + " " + $e[1]), timeout: 10}]}])))'
 
+# The surikat Claude Code plugin ships the same hooks; both would run them
+# twice.
+PLUGIN_ID=surikat@tmux-surikat
+plugin_enabled() {
+  [ -f "$CLAUDE_SETTINGS" ] &&
+    jq -e --arg p "$PLUGIN_ID" '.enabledPlugins[$p] == true' "$CLAUDE_SETTINGS" >/dev/null 2>&1
+}
+
 merge_settings() {
   local action=$1 new=$TMPD/settings.json orig=$TMPD/settings.orig
   say "hooks -> $CLAUDE_SETTINGS"
@@ -341,11 +349,17 @@ remove_state() {
 if [ $mode = install ]; then
   check_requirements
   install_scripts
-  merge_settings add
+  if plugin_enabled; then
+    say "hooks: the surikat Claude Code plugin is enabled and provides them"
+    merge_settings strip
+  else
+    merge_settings add
+  fi
   install_tmux_conf
   say ""
   say "done. Running Claude sessions pick up the hooks with their next event."
   say "Keys: prefix C dashboard · prefix N next waiting · prefix P back · prefix T tree"
+  say "(change them with @surikat_key_*; see the README)"
 else
   uninstall_tmux_conf
   merge_settings strip

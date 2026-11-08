@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# surikat-tmux: apply surikat's tmux formats to the running server.
+# surikat-tmux: apply surikat's tmux formats and key bindings to the running
+# server. Run from surikat.conf (install.sh) or surikat.tmux (TPM).
 #
 #   surikat-tmux            apply (idempotent; safe to run on every re-source)
 #   surikat-tmux --remove   undo everything
 #
 # Prepends per-pane icons to the window formats and appends the summary to
-# status-right. It never replaces the user's own styling.
+# status-right. It never replaces the user's own styling. Keys are set with
+# @surikat_key_{dashboard,next,back,tree} (prefix table; "" or none = unbound).
 
 set -u
 
@@ -18,13 +20,21 @@ MARK=$("$here/surikat" --tmux-mark 2>/dev/null)
 [ -n "$ICON" ] || ICON='#{?#{==:#{@surikat},perm},🔴 ,#{?#{==:#{@surikat},ask},❓ ,#{?#{==:#{@surikat},idle},🟡 ,#{?#{==:#{@surikat},done},🟢 ,#{?#{==:#{@surikat},running},⚙ ,}}}}}'
 [ -n "$MARK" ] || MARK='#{?#{==:#{@surikat_mark},fav},★,#{?#{==:#{@surikat_mark},side},↓,}}'
 
-# Where `surikat` lives, as tmux should call it from status-right. Keep a
-# literal ~ for paths under $HOME so the format stays readable and portable.
-bin=${SURIKAT_BIN:-$(cd "$(dirname "$0")" && pwd)}
+# Where `surikat` lives, as tmux should call it through sh. Keep a literal ~
+# for paths under $HOME so the formats stay readable and portable; quote
+# paths with unusual characters.
+abs=${SURIKAT_BIN:-$here}
+bin=$abs
 case $bin in
   "$HOME"/*) bin="~${bin#"$HOME"}" ;;
 esac
-COUNT=" #($bin/surikat --count)"
+case $bin in
+  *[!A-Za-z0-9_./~+@-]*) SK="'${abs//\'/\'\\\'\'}/surikat'" ;;
+  *) SK="$bin/surikat" ;;
+esac
+COUNT=" #($SK --count)"
+
+TREE_FMT='#{?pane_format,#{E:@surikat_tree_pane_icon}#{pane_current_command}  #{pane_current_path},#{?window_format,#{E:@surikat_tree_window_icons}#{window_name}#{window_flags},#{session_windows} windows#{?session_attached, (attached),}}}'
 
 get() { tmux show -gv "$1" 2>/dev/null; }
 
@@ -34,7 +44,72 @@ save() {
   [ -n "$(get "@surikat_orig_$1")" ] || tmux set -g "@surikat_orig_$1" "$2"
 }
 
-strip_count() { sed 's| #([^)]*/surikat --count)||g'; }
+strip_count() { sed "s| #([^)]*/surikat'\{0,1\} --count)||g"; }
+
+# key NAME DEFAULT: the key configured for NAME; empty if disabled.
+key() {
+  local v
+  if v=$(get "@surikat_key_$1"); then
+    [ "$v" = none ] && v=
+    printf '%s' "$v"
+  else
+    printf '%s' "$2"
+  fi
+}
+
+ours() { tmux list-keys -T prefix "$1" 2>/dev/null | grep -q surikat; }
+
+# Unbind the keys surikat bound and restore what they did before.
+restore_keys() {
+  local k keys legacy=0 legacy_c=0 orig tmp
+  # Installs from before the keys were saved always bound C, N, P and T,
+  # and C was tmux's customize-mode.
+  keys=$(get @surikat_keys) || {
+    keys='C N P T'
+    legacy=1
+  }
+  for k in $keys; do
+    if ours "$k"; then
+      tmux unbind -T prefix "$k"
+      [ "$legacy.$k" = 1.C ] && legacy_c=1
+    fi
+  done
+  orig=$(get @surikat_orig_keys)
+  if [ -n "$orig" ]; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/surikat-keys.XXXXXX") && {
+      printf '%s\n' "$orig" >"$tmp"
+      tmux source-file "$tmp"
+      rm -f "$tmp"
+    }
+  fi
+  [ $legacy_c = 1 ] && tmux bind -T prefix C customize-mode -Z
+  tmux set -gu @surikat_keys \; set -gu @surikat_orig_keys
+  return 0
+}
+
+# bind_key KEY COMMAND...: bind in the prefix table, saving the old binding.
+KEYS='' ORIG=''
+bind_key() {
+  local k=$1 old
+  shift
+  [ -n "$k" ] || return 0
+  old=$(tmux list-keys -T prefix "$k" 2>/dev/null)
+  [ -n "$old" ] && ORIG="$ORIG${ORIG:+$'\n'}$old"
+  KEYS="$KEYS${KEYS:+ }$k"
+  tmux bind -T prefix "$k" "$@"
+}
+
+apply_keys() {
+  restore_keys
+  KEYS='' ORIG=''
+  bind_key "$(key dashboard C)" display-popup -E -w 85% -h 80% "$SK"
+  bind_key "$(key next N)" run-shell -b "$SK --next --client '#{client_name}'"
+  bind_key "$(key back P)" run-shell -b "$SK --back --client '#{client_name}'"
+  bind_key "$(key tree T)" choose-tree -Zw -F "$TREE_FMT"
+  tmux set -g @surikat_keys "$KEYS"
+  [ -n "$ORIG" ] && tmux set -g @surikat_orig_keys "$ORIG"
+  return 0
+}
 
 apply() {
   tmux set -g @surikat_pane_icon "$ICON" \; \
@@ -54,7 +129,7 @@ apply() {
 
   v=$(get status-right)
   case $v in
-    *"/surikat --count)"*) ;;
+    *"/surikat --count)"* | *"/surikat' --count)"*) ;;
     *) tmux set -g status-right "$v$COUNT" ;;
   esac
 
@@ -69,6 +144,8 @@ apply() {
     save status_interval "${n:-0}"
     tmux set -g status-interval 5
   fi
+
+  apply_keys
 }
 
 remove() {
@@ -82,7 +159,8 @@ remove() {
 
   v=$(get status-right)
   case $v in
-    *"/surikat --count)"*) tmux set -g status-right "$(printf '%s' "$v" | strip_count)" ;;
+    *"/surikat --count)"* | *"/surikat' --count)"*)
+      tmux set -g status-right "$(printf '%s' "$v" | strip_count)" ;;
   esac
 
   v=$(get @surikat_orig_status_right_length)
@@ -90,11 +168,12 @@ remove() {
   v=$(get @surikat_orig_status_interval)
   [ -n "$v" ] && tmux set -g status-interval "$v"
 
+  restore_keys
+
   tmux set -gu @surikat_pane_icon \; set -gu @surikat_window_icons \; \
     set -gu @surikat_mark_icon \; set -gu @surikat_tree_pane_icon \; \
     set -gu @surikat_tree_window_icons \; \
-    set -gu @surikat_orig_status_right_length \; set -gu @surikat_orig_status_interval \; \
-    bind C customize-mode -Z \; unbind N \; unbind P \; unbind T
+    set -gu @surikat_orig_status_right_length \; set -gu @surikat_orig_status_interval
 
   local p
   for p in $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null); do
@@ -105,7 +184,7 @@ remove() {
 case ${1:-} in
   "") apply ;;
   --remove) remove ;;
-  -h | --help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h | --help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
   *)
     echo "usage: surikat-tmux [--remove]" >&2
     exit 2

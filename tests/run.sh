@@ -207,7 +207,64 @@ check "--remove restores window-status-format" eq "$(tmux show -gv window-status
 check "--remove restores status-right-length" eq "$(tmux show -gv status-right-length)" 40
 check "--remove unsets pane options" eq "$(popt "$P1")" ""
 check "--remove unsets marks" eq "$(tmux display -p -t "$P1" '#{@surikat_mark}')" ""
+check "--remove restores customize-mode on C" sh -c "tmux list-keys -T prefix C | grep -q customize-mode"
+check "--remove unbinds N" sh -c "! tmux list-keys -T prefix N >/dev/null 2>&1"
+
+echo "--- keys"
+bound() { tmux list-keys -T prefix "$1" 2>/dev/null | grep -q "$2"; }
+tmux bind -T prefix T display-message mine
+tmux set -g @surikat_key_dashboard M
+tmux set -g @surikat_key_back ''
+tmux set -g @surikat_key_tree none
 "$BIN/surikat-tmux"
+check "custom key bound" bound M 'display-popup.*surikat'
+check "default key left alone when moved" bound C customize-mode
+check "default next key" bound N 'surikat --next'
+check "'' disables a key" sh -c "! tmux list-keys -T prefix P >/dev/null 2>&1"
+check "none disables a key" bound T 'display-message mine'
+tmux set -g @surikat_key_tree T
+"$BIN/surikat-tmux"
+check "re-apply binds a re-enabled key" bound T choose-tree
+tmux set -g @surikat_key_dashboard X
+"$BIN/surikat-tmux"
+check "re-apply restores the old key (tmux default)" bound M 'select-pane -M'
+check "re-apply binds the new key" bound X 'display-popup.*surikat'
+"$BIN/surikat-tmux" --remove
+check "--remove restores the user's own binding" bound T 'display-message mine'
+check "--remove unbinds custom keys" sh -c "! tmux list-keys -T prefix X >/dev/null 2>&1"
+tmux set -gu @surikat_key_dashboard \; set -gu @surikat_key_back \; set -gu @surikat_key_tree \; unbind T
+# An install from before the keys were saved: C, N, P, T bound, nothing saved.
+# shellcheck disable=SC2088 # the literal ~ is what the old conf had
+tmux bind C display-popup -E "~/.local/bin/surikat" \; bind N run-shell "~/.local/bin/surikat --next" \; \
+  bind P run-shell "~/.local/bin/surikat --back"
+"$BIN/surikat-tmux" --remove
+check "legacy: C back to customize-mode" bound C customize-mode
+check "legacy: N and P unbound" sh -c "! tmux list-keys -T prefix N >/dev/null 2>&1 && ! tmux list-keys -T prefix P >/dev/null 2>&1"
+mkdir -p "$T/a b"
+ln -s "$BIN/surikat" "$T/a b/surikat"
+SURIKAT_BIN="$T/a b" "$BIN/surikat-tmux"
+check "a path with spaces is quoted" bound N "'$T/a b/surikat' --next"
+check "status-right quotes it too" sh -c "tmux show -gv status-right | grep -qF \"#('$T/a b/surikat' --count)\""
+SURIKAT_BIN="$T/a b" "$BIN/surikat-tmux" --remove
+check "--remove strips a quoted summary" sh -c "! tmux show -gv status-right | grep -q surikat"
+"$REPO/surikat.tmux"
+check "TPM entry point binds keys to the repo's scripts" bound N "bin/surikat --next"
+"$BIN/surikat-tmux" --remove
+"$BIN/surikat-tmux"
+
+echo "--- Claude Code plugin"
+ev_install=$(sed -n "/^EVENTS='/,/'\$/p" "$REPO/install.sh" | sed "s/^EVENTS='//; s/'\$//" |
+  jq -c 'map("\(.[0]) \(.[1])") | sort')
+ev_plugin=$(jq -c '.hooks | to_entries | map("\(.key) \(.value[0].hooks[0].command | split(" ") | last)") | sort' \
+  "$REPO/hooks/hooks.json")
+check "plugin hooks match install.sh" eq "$ev_plugin" "$ev_install"
+check "plugin and marketplace names agree" eq "$(jq -r .name "$REPO/.claude-plugin/plugin.json")" \
+  "$(jq -r '.plugins[0].name' "$REPO/.claude-plugin/marketplace.json")"
+reset_state
+cmd=$(jq -r '.hooks.Stop[0].hooks[0].command' "$REPO/hooks/hooks.json")
+js p1 '{last_assistant_message: "via plugin"}' |
+  CLAUDE_PLUGIN_ROOT=$REPO TMUX_PANE=$P1 sh -c "$cmd"
+check "plugin hook command records the state" eq "$(field p1 state)" 'done'
 
 echo "--- surikat"
 reset_state

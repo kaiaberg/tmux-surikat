@@ -125,6 +125,17 @@ check "--copy creates tmux.conf" grep -qxF 'source-file -q ~/.tmux/surikat.conf'
 check "uninstall removes a tmux.conf it created" test ! -e "$HOME/.tmux.conf"
 check "uninstall removes copies" test ! -e "$HOME/.local/bin/surikat"
 
+# The Claude Code plugin provides the hooks: install leaves them out, and
+# drops ones from an earlier install.sh run.
+"$REPO/install.sh" >/dev/null 2>&1
+jq '.enabledPlugins = {"surikat@tmux-surikat": true}' "$S" >"$T/s.json" && mv "$T/s.json" "$S"
+"$REPO/install.sh" >"$T/plugin.out" 2>&1
+check "plugin enabled: install succeeds" test $? -eq 0
+check "plugin enabled: says why" grep -q 'plugin is enabled' "$T/plugin.out"
+check "plugin enabled: no surikat hooks in settings" test "$(jq '[.hooks // {} | .[][] .hooks[] | select(.command | test("surikat-hook"))] | length' "$S")" = 0
+check "plugin enabled: tmux side still installed" grep -qxF 'source-file -q ~/.tmux/surikat.conf' "$HOME/.tmux.conf"
+"$REPO/install.sh" --uninstall >/dev/null 2>&1
+
 # Invalid settings: refuse, change nothing.
 echo '{ not json' >"$S"
 "$REPO/install.sh" >"$T/bad.out" 2>&1

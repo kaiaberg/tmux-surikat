@@ -15,11 +15,15 @@ popup dashboard with a live preview.
 The glyphs are colored (red, green, dim, …); see [Look](#look) for Nerd
 Font icons, emoji and your own colors.
 
-This is **not a TPM plugin**. It installs with `./install.sh`, which also adds
-hooks to Claude Code's settings (`~/.claude/settings.json`). Everything is
-backed up first and `./install.sh --uninstall` reverses it.
+surikat only watches. Unlike session managers such as claude-squad, it
+doesn't start, wrap or arrange your sessions, so it fits the tmux layout you
+already have. It has two halves: Claude Code hooks that record each
+session's state, and a tmux side that shows it. [Install](#install) them
+with TPM and the Claude Code plugin, or with `./install.sh`.
 
 ## Features
+
+Keys are the defaults; see [Keys](#keys) to change them.
 
 | Key / command | What it does |
 |---|---|
@@ -46,13 +50,28 @@ backed up first and `./install.sh --uninstall` reverses it.
 
 `prefix N` visits ●/◆ first, then ◐, then ✓, oldest wait first.
 
+### Keys
+
+All four keys are in the prefix table. Change them in `~/.tmux.conf`:
+
+```tmux
+set -g @surikat_key_dashboard D   # default C (replaces customize-mode)
+set -g @surikat_key_next N
+set -g @surikat_key_back P
+set -g @surikat_key_tree none     # '' or none: don't bind this one
+```
+
+Whatever a key did before is restored when surikat moves off it or is
+uninstalled.
+
 In the dashboard the wait time is dim for the first 5 minutes and turns bold
 red after an hour.
 
 ### Look
 
-Set these in `~/.tmux.conf` *before* the `source-file … surikat.conf` line,
-or reload the config after changing them:
+Set these and the [keys](#keys) in `~/.tmux.conf` *before* surikat loads
+(the `source-file … surikat.conf` line, or TPM's `run` line at the end), or
+reload the config after changing them:
 
 ```tmux
 set -g @surikat_style glyph        # glyph (default), nerd or emoji
@@ -120,8 +139,45 @@ sudo apt install tmux jq fzf      # Debian/Ubuntu
 
 ## Install
 
+surikat needs both halves: the hooks in Claude Code and the tmux side.
+Install them with the plugin managers you already use, or both at once with
+`install.sh`.
+
+### With TPM and the Claude Code plugin
+
+The tmux side, with [TPM](https://github.com/tmux-plugins/tpm): add this to
+`~/.tmux.conf` and press `prefix I`:
+
+```tmux
+set -g @plugin 'kaiaberg/tmux-surikat'
+```
+
+The hooks, in Claude Code:
+
+```
+/plugin install surikat --marketplace kaiaberg/tmux-surikat
+```
+
+On older Claude Code versions, run `/plugin marketplace add
+kaiaberg/tmux-surikat` and then `/plugin install surikat@tmux-surikat`.
+Restart running Claude sessions to load the hooks.
+
+The `surikat` command (`--list`, `--watch`, …) is then in
+`~/.tmux/plugins/tmux-surikat/bin`; link it onto your `PATH` if you want it:
+
 ```sh
-git clone <this repo> ~/code/tmux-surikat
+ln -s ~/.tmux/plugins/tmux-surikat/bin/surikat ~/.local/bin/
+```
+
+To uninstall, run `/plugin uninstall surikat@tmux-surikat` in Claude Code,
+then `~/.tmux/plugins/tmux-surikat/bin/surikat-tmux --remove`, then remove
+the `@plugin` line and press `prefix alt-u`. State is kept in
+`~/.local/state/surikat`; delete it if you like.
+
+### With install.sh
+
+```sh
+git clone https://github.com/kaiaberg/tmux-surikat ~/code/tmux-surikat
 cd ~/code/tmux-surikat
 ./install.sh --dry-run   # see what would change
 ./install.sh
@@ -134,7 +190,8 @@ The installer:
 - links `tmux/surikat.conf` to `~/.tmux/surikat.conf` and appends one line,
   `source-file -q ~/.tmux/surikat.conf`, to `~/.tmux.conf`;
 - merges the hook entries into `~/.claude/settings.json`, keeping all your
-  other settings and hooks;
+  other settings and hooks (unless the Claude Code plugin is enabled, which
+  already provides them; both would run every hook twice);
 - loads `surikat.conf` into a running tmux server.
 
 Every changed file is backed up as `<file>.bak.<timestamp>`. Running Claude
@@ -142,7 +199,7 @@ sessions pick up the hooks with their next event; no restart needed.
 
 Overrides: `BIN_DIR`, `TMUX_CONF`, `CLAUDE_SETTINGS`.
 
-### Uninstall
+To uninstall:
 
 ```sh
 ./install.sh --uninstall
@@ -152,6 +209,20 @@ This removes the hooks, the scripts, the tmux line (your `.tmux.conf` ends up
 byte-identical), the key bindings and formats from the running server, and
 this host's state. Backups are kept.
 
+### What it changes in tmux
+
+However you install it, surikat:
+
+- prepends `#{E:@surikat_window_icons}` to `window-status-format` and
+  `window-status-current-format`, keeping your own styling;
+- appends the summary, `#(surikat --count)`, to `status-right`;
+- raises `status-right-length` to 80 if it is lower, and sets
+  `status-interval` to 5 if it is 0 or higher, so the summary stays current;
+- binds the four [keys](#keys).
+
+`surikat-tmux --remove` (run by `./install.sh --uninstall`) restores all of
+it.
+
 ## How it works
 
 ```
@@ -160,7 +231,7 @@ Claude Code hook (JSON on stdin)
        ├─ writes  $STATE_DIR/<session_id>.json   (atomic: tmp + mv)
        └─ sets    tmux pane option @surikat=<state>
 
-tmux (surikat.conf → surikat-tmux)
+tmux (surikat.conf or surikat.tmux → surikat-tmux)
   ├─ window formats: #{E:@surikat_window_icons} = #{P:#{E:@surikat_pane_icon}}
   ├─ status-right:   #(surikat --count)   every 5s
   └─ keys C / N / P / T → surikat / choose-tree
@@ -190,18 +261,23 @@ The hook never prints anything, always exits 0 and takes roughly 50–80ms.
 ```sh
 tests/run.sh               # unit/integration tests on a private tmux server
 tests/sandbox-install.sh   # install.sh against a throwaway HOME
-shellcheck bin/* install.sh tests/*.sh
+shellcheck bin/* install.sh tests/*.sh surikat.tmux
 ```
 
-The tests never touch your real tmux server or state. Environment overrides
+CI runs all three on Ubuntu 22.04 (the minimum versions), the latest Ubuntu
+and macOS (with `/bin/bash` 3.2). The tests never touch your real tmux server or state. Environment overrides
 for experiments: `SURIKAT_DIR` (state dir), `SURIKAT_STALE_HOURS`,
-`SURIKAT_INTERVAL` (`--watch`), `SURIKAT_BIN` (path used in status-right),
+`SURIKAT_INTERVAL` (`--watch`), `SURIKAT_BIN` (path used in status-right
+and the key bindings),
 `SURIKAT_ORDER` (`asc`/`desc`, overrides `@surikat_order`), `SURIKAT_STYLE`
 (overrides `@surikat_style`).
 
 Portability rules for contributors: bash 3.2, no `/proc`, no GNU-only tool
 flags (`sed -i`, `readlink -f`, `stat -c`, `date -d`, `timeout`, …), and keep
 the fzf command strings plain so they work in any `$SHELL`.
+
+The hook events are listed twice: `EVENTS` in `install.sh` and
+`hooks/hooks.json` for the plugin. `tests/run.sh` checks that they match.
 
 See [TESTING.md](TESTING.md) for the manual checklist.
 
@@ -221,3 +297,7 @@ See [TESTING.md](TESTING.md) for the manual checklist.
 - Emoji widths depend on your terminal and font.
 - No notifications outside tmux (bell, desktop, push) by design: they depend
   on the terminal, OS or an external service.
+
+## License
+
+MIT; see [LICENSE](LICENSE).

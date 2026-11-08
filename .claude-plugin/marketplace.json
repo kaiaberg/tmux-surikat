@@ -1,0 +1,14 @@
+{
+  "name": "tmux-surikat",
+  "owner": {
+    "name": "Kaia Berg"
+  },
+  "description": "surikat: see which Claude Code sessions need you, from the tmux status bar.",
+  "plugins": [
+    {
+      "name": "surikat",
+      "source": "./",
+      "description": "Shows which Claude Code sessions need you, in the tmux status bar."
+    }
+  ]
+}

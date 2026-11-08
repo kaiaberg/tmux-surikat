@@ -5,7 +5,7 @@
 ```sh
 tests/run.sh               # private tmux server, temp state
 tests/sandbox-install.sh   # install.sh against a throwaway HOME + tmux server
-shellcheck bin/* install.sh tests/*.sh
+shellcheck bin/* install.sh tests/*.sh surikat.tmux
 ```
 
 Run them on Linux and on macOS (with `/bin/bash` 3.2) when you can. Neither
@@ -42,3 +42,9 @@ Run this after a real install. `prefix` is your tmux prefix.
 11. Re-source the tmux config twice: no errors, no duplicates.
 12. `./install.sh --uninstall`: icons, summary and bindings are gone, and
     `~/.tmux.conf` matches its backup.
+13. TPM and plugin path, on a machine without the install.sh setup: add
+    `set -g @plugin 'kaiaberg/tmux-surikat'`, `prefix I`, then
+    `/plugin install surikat --marketplace kaiaberg/tmux-surikat` and a new
+    Claude session. Steps 2–4 work, and `/hooks` lists surikat's hooks once.
+    With `set -g @surikat_key_dashboard D` and a config reload, `prefix D`
+    opens the dashboard and `prefix C` is customize-mode again.
