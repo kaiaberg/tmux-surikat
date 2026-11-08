@@ -235,7 +235,7 @@ check "message falls back to the prompt" sh -c "'$BIN/surikat' --list | grep -q 
 echo "--- theme"
 check "age: dim when fresh" sh -c "'$BIN/surikat' --rows | grep -q \"^$P3	  $(printf '\033')\\[32m✓$(printf '\033')\\[0m $(printf '\033')\\[1;31m\""
 setf d1 ".since = $(($(date +%s) - 10))"
-check "age: bold red after an hour, dim when fresh" sh -c "'$BIN/surikat' --rows | grep \"^$P3	\" | grep -q \"$(printf '\033')\\[2m10s\""
+check "age: bold red after an hour, dim when fresh" sh -c "'$BIN/surikat' --rows | grep \"^$P3	\" | grep -q \"$(printf '\033')\\[2m1[01]s\""
 setf d1 '.since = 500'
 check "--list without a tty has no escapes" sh -c "! '$BIN/surikat' --list | grep -q \"$(printf '\033')\""
 check "emoji style" eq "$(SURIKAT_STYLE=emoji "$BIN/surikat" --list | awk '{print $1}' | tr '\n' ' ')" "🔴 🔴 🟢 ⚙ ⚪ "
