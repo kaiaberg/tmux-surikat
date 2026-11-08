@@ -593,12 +593,15 @@ EOF
   done
   check "fzf 0.38: ctrl-o flips the order" eq "$(first_row)" old
   close_picker "$PK"
-  PK=$(open_old 0.44.1)
-  check "fzf 0.44: picker opens" wait_for "$PK" "needs permission"
-  check "fzf 0.44: header names the order" wait_for "$PK" "shortest wait first"
-  tmux send-keys -t "$PK" C-o
-  check "fzf 0.44: ctrl-o updates the header" wait_for "$PK" "longest wait first"
-  close_picker "$PK"
+  # The shim can only claim versions the real fzf underneath can serve.
+  if [ "$FZF_V" -ge 44001 ]; then
+    PK=$(open_old 0.44.1)
+    check "fzf 0.44: picker opens" wait_for "$PK" "needs permission"
+    check "fzf 0.44: header names the order" wait_for "$PK" "shortest wait first"
+    tmux send-keys -t "$PK" C-o
+    check "fzf 0.44: ctrl-o updates the header" wait_for "$PK" "longest wait first"
+    close_picker "$PK"
+  fi
   PK=$(open_old 0.28.0)
   check "fzf 0.28: says the version is too old" wait_for "$PK" "needs fzf 0.29 or newer"
   close_picker "$PK"
