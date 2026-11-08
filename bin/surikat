@@ -378,8 +378,8 @@ rows() {
     | (if $m == "" then (.prompt // "") else $m end) as $msg
     | (mark($marks) == 2) as $side
     | (if $side and $ansi == "1" then "\u001b[2m" else "" end) as $re
-    | age_sgr as $as
-    | (age | fit(4) | if $side then . else paint($as; $re) end) as $age
+    | age_sgr as $agec
+    | (age | fit(4) | if $side then . else paint($agec; $re) end) as $age
     | "\(mark_icon($marks; $re)) \(icon($re)) \($age) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))" as $line
     | "\(.pane // "")\t" + (if $re != "" then "\($re)\($line)\u001b[0m" else $line end)'
 }
@@ -465,7 +465,9 @@ next() {
   ctx
   local queue
   # shellcheck disable=SC2016
-  queue=$(jq_records -r -s --arg sock "$SOCKET" --argjson marks "$MARKS" "$JQ_DEFS"'
+  # JQ_DEFS refers to $ansi and $th; jq 1.6 needs them even when unused.
+  queue=$(jq_records -r -s --arg sock "$SOCKET" --argjson marks "$MARKS" \
+    --arg ansi 0 --argjson th '{}' "$JQ_DEFS"'
     map(select(pri <= 2 and mark($marks) < 2 and (.pane // "") != "" and (.socket // "") == $sock))
     | ordered($marks; "desc")
     | (reduce .[].pane as $p ([]; if any(.[]; . == $p) then . else . + [$p] end)) as $panes

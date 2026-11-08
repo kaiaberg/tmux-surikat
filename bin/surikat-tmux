@@ -46,10 +46,13 @@ save() {
 
 strip_count() { sed "s| #([^)]*/surikat'\{0,1\} --count)||g"; }
 
-# key NAME DEFAULT: the key configured for NAME; empty if disabled.
+# key NAME DEFAULT: the key configured for NAME; empty if disabled. tmux
+# 3.2's `show -gv` succeeds for unset options, so ask `show -g`, which
+# prints nothing for them and `@opt ''` for an empty value.
 key() {
   local v
-  if v=$(get "@surikat_key_$1"); then
+  if [ -n "$(tmux show -g "@surikat_key_$1" 2>/dev/null)" ]; then
+    v=$(get "@surikat_key_$1")
     [ "$v" = none ] && v=
     printf '%s' "$v"
   else
@@ -64,7 +67,9 @@ restore_keys() {
   local k keys legacy=0 legacy_c=0 orig tmp
   # Installs from before the keys were saved always bound C, N, P and T,
   # and C was tmux's customize-mode.
-  keys=$(get @surikat_keys) || {
+  # (Only keys bound to surikat are unbound, so guessing is safe.)
+  keys=$(get @surikat_keys)
+  [ -n "$keys" ] || {
     keys='C N P T'
     legacy=1
   }
