@@ -580,12 +580,15 @@ flip() {
   esac
 }
 
+# header FILE [static]: the picker's header. "static" is for fzf < 0.40,
+# which can't update the header, so it doesn't name the current order.
 header() {
   local o
   case $(state_order "$1") in
     asc) o='shortest wait first' ;;
     *) o='longest wait first' ;;
   esac
+  [ "${2:-}" = static ] && o='flip wait time'
   theme
   printf '%s\n%s\n%s\n' "$(legend ansi)" \
     "ctrl-f: $(paint fav "$(glyph fav)" ansi) favorite · ctrl-l: $(paint side "$(glyph side)" ansi) sideline · ctrl-o: order ($o)" \
@@ -609,6 +612,27 @@ preview() {
     tail -n "$n"
 }
 
+# fzf_version: fzf's version as a number (0.44.1 -> 44001), 0 if unknown.
+fzf_version() {
+  local v
+  v=$(fzf --version 2>/dev/null)
+  v=${v%% *}
+  case $v in
+    [0-9]*.[0-9]*) ;;
+    *)
+      echo 0
+      return 0
+      ;;
+  esac
+  local IFS=. a b c
+  # shellcheck disable=SC2086
+  set -- $v
+  a=${1%%[!0-9]*} b=${2%%[!0-9]*} c=${3:-}
+  c=${c%%[!0-9]*}
+  echo $((${a:-0} * 1000000 + ${b:-0} * 1000 + ${c:-0}))
+}
+
+FZF_MIN=29000 # 0.29: --preview-window border-top
 picker() {
   command -v fzf >/dev/null 2>&1 || {
     echo "surikat: fzf is not installed; the dashboard needs it."
@@ -616,27 +640,45 @@ picker() {
     sleep 3
     return 1
   }
+  local fv
+  fv=$(fzf_version)
+  # Unknown versions (0) get the oldest set of options.
+  if [ "$fv" -gt 0 ] && [ "$fv" -lt $FZF_MIN ]; then
+    echo "surikat: the dashboard needs fzf 0.29 or newer; you have $(fzf --version)."
+    echo "Use 'surikat --list' or 'surikat --watch' instead."
+    sleep 3
+    return 1
+  fi
   gc
   ctx
-  local w out key sel q="'$SELF'" st s reload
+  local w out key sel q="'$SELF'" st s reload hd='' flip opts=()
   st=$(mktemp "${TMPDIR:-/tmp}/surikat.XXXXXX") || return 1
   # shellcheck disable=SC2064
   trap "rm -f '$st'" EXIT
   default_order >"$st"
   s="'$st'"
   reload="reload($q --rows --state $s)"
+  flip="execute-silent($q --flip $s)"
+  # Newer fzf: keep the cursor on the same session across reloads (0.71),
+  # and show the current order in the header (0.40).
+  [ "$fv" -ge 71000 ] && opts+=(--track --id-nth=1)
+  if [ "$fv" -ge 40000 ]; then
+    flip="$flip+transform-header($q --header $s)"
+  else
+    hd=static
+  fi
   w=$(width)
   out=$(SURIKAT_WIDTH=$((w - 2)) ROWS_ANSI=1 rows "$SOCKET" "$(state_order "$st")" |
-    SURIKAT_WIDTH=$((w - 2)) fzf --ansi --no-sort --reverse --cycle --track --id-nth=1 \
+    SURIKAT_WIDTH=$((w - 2)) fzf --ansi --no-sort --reverse --cycle ${opts[@]+"${opts[@]}"} \
       --delimiter=$'\t' --with-nth=2.. \
-      --header="$(header "$st")" \
+      --header="$(header "$st" "$hd")" \
       --expect=enter --preview="$q --preview {1}" \
       --preview-window='down,60%,follow,border-top' \
       --bind="ctrl-r:$reload" \
       --bind="ctrl-x:execute-silent($q --seen {1})+$reload" \
       --bind="ctrl-f:execute-silent($q --fav {1})+$reload" \
       --bind="ctrl-l:execute-silent($q --side {1})+$reload" \
-      --bind="ctrl-o:execute-silent($q --flip $s)+transform-header($q --header $s)+$reload")
+      --bind="ctrl-o:$flip+$reload")
   rm -f "$st"
   key=${out%%$'\n'*}
   sel=${out#*$'\n'}

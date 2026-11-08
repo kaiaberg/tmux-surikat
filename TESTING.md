@@ -29,9 +29,10 @@ Run this after a real install. `prefix` is your tmux prefix.
    waiting, `prefix N` cycles and wraps, and `prefix P` retraces.
 8. `prefix C`: sorted rows, preview, Enter, `ctrl-x`, Esc. `ctrl-f` puts a ★
    row first within its state, `ctrl-l` dims it and moves it last, `ctrl-o`
-   flips the order shown in the header, and Down on the last row wraps to the
-   top. `prefix T` shows icons and ★/↓; `prefix w` is unchanged. A sidelined
-   session is skipped by `prefix N` and missing from `status-right`.
+   flips the order shown in the header (fzf ≥ 0.40), and Down on the last
+   row wraps to the top. `prefix T` shows icons and ★/↓; `prefix w` is
+   unchanged. A sidelined session is skipped by `prefix N` and missing from
+   `status-right`.
 9. Glyphs are colored and line up in the status bar, `status-right`, the
    dashboard and `prefix T`. `set -g @surikat_style emoji` (and `nerd`, with a
    Nerd Font), then reload the config: all of them switch. A color override

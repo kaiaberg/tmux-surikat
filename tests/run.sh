@@ -395,6 +395,7 @@ done
 
 if command -v fzf >/dev/null; then
   echo "--- picker (fzf $(fzf --version | cut -d' ' -f1))"
+  FZF_V=$(fzf --version | awk '{ split($1, v, "."); print v[1] * 1000000 + v[2] * 1000 + v[3] }')
   # wait_for PANE TEXT: poll the pane until TEXT shows up (max ~5s).
   wait_for() {
     local i=0
@@ -456,9 +457,14 @@ if command -v fzf >/dev/null; then
   done
   check "selection is cyclic; ctrl-f marks a favorite" eq "$(tmux display -p -t "$P1" '#{@surikat_mark}')" fav
   check "favorite shows a star in the picker" wait_for "$PK" "★ ●"
-  check "picker header shows the default order" wait_for "$PK" "shortest wait first"
-  tmux send-keys -t "$PK" C-o
-  check "ctrl-o toggles the order" wait_for "$PK" "longest wait first"
+  if [ "$FZF_V" -ge 40000 ]; then
+    check "picker header shows the default order" wait_for "$PK" "shortest wait first"
+    tmux send-keys -t "$PK" C-o
+    check "ctrl-o toggles the order" wait_for "$PK" "longest wait first"
+  else
+    # fzf < 0.40 can't update the header (covered by the shim tests below).
+    tmux send-keys -t "$PK" C-o
+  fi
   # The header changes before the reload; keys sent during a reload are
   # undone when --track restores the cursor, so let it finish.
   sleep 0.5
@@ -479,6 +485,66 @@ if command -v fzf >/dev/null; then
     i=$((i + 1))
   done
   check "esc closes the picker" test "$(tmux display -p -t "$PK" '#{pane_id}' 2>/dev/null)" != "$PK"
+
+  echo "--- picker with an older fzf (shim)"
+  # A shim that claims an older version and, like a real old fzf, rejects
+  # options that version doesn't know. Distros ship old fzf: Debian 12 has
+  # 0.38, Ubuntu 24.04 0.44.
+  REAL_FZF=$(command -v fzf)
+  mkdir -p "$T/oldfzf"
+  cat >"$T/oldfzf/fzf" <<EOF
+#!/bin/sh
+v=\$(cat "$T/oldfzf/version")
+[ "\$1" = --version ] && { echo "\$v (shim)"; exit 0; }
+for a in "\$@"; do
+  case \$a in
+    --track | --id-nth*) echo "unknown option: \$a" >&2; exit 2 ;;
+    *transform-header*)
+      [ "\$(echo "\$v" | cut -d. -f2)" -lt 40 ] && { echo "unknown action" >&2; exit 2; } ;;
+  esac
+done
+exec "$REAL_FZF" "\$@"
+EOF
+  chmod +x "$T/oldfzf/fzf"
+  # open_old VERSION: open the picker with the shim claiming VERSION.
+  open_old() {
+    echo "$1" >"$T/oldfzf/version"
+    PATH="$T/oldfzf:$PATH" open_picker
+  }
+  close_picker() {
+    tmux send-keys -t "$1" Escape
+    tmux kill-pane -t "$1" 2>/dev/null
+  }
+  reset_state
+  hook stop "$P1" "$(js o1 '{last_assistant_message: "old one"}')"
+  hook stop "$P3" "$(js o2 '{last_assistant_message: "new one"}')"
+  setf o1 '.since = 1000'
+  PK=$(open_old 0.38.0)
+  check "fzf 0.38: picker opens" wait_for "$PK" "needs permission"
+  check "fzf 0.38: static ctrl-o hint" wait_for "$PK" "order (flip wait time)"
+  # first_row: "old" or "new", whichever session is listed first.
+  first_row() {
+    tmux capture-pane -p -t "$PK" | grep -oE '(old|new) one' | head -n 1 | cut -d' ' -f1
+  }
+  wait_for "$PK" "old one" >/dev/null
+  check "fzf 0.38: shortest wait first by default" eq "$(first_row)" new
+  tmux send-keys -t "$PK" C-o
+  i=0
+  while [ "$(first_row)" != old ] && [ $i -lt 30 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  check "fzf 0.38: ctrl-o flips the order" eq "$(first_row)" old
+  close_picker "$PK"
+  PK=$(open_old 0.44.1)
+  check "fzf 0.44: picker opens" wait_for "$PK" "needs permission"
+  check "fzf 0.44: header names the order" wait_for "$PK" "shortest wait first"
+  tmux send-keys -t "$PK" C-o
+  check "fzf 0.44: ctrl-o updates the header" wait_for "$PK" "longest wait first"
+  close_picker "$PK"
+  PK=$(open_old 0.28.0)
+  check "fzf 0.28: says the version is too old" wait_for "$PK" "needs fzf 0.29 or newer"
+  close_picker "$PK"
 fi
 
 echo

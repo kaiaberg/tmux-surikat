@@ -107,7 +107,9 @@ bind S run-shell "~/.local/bin/surikat --side '#{pane_id}'"
 - tmux ≥ 3.2
 - bash ≥ 3.2 (macOS's `/bin/bash` is fine)
 - jq ≥ 1.6
-- fzf (only for the `prefix C` dashboard)
+- fzf ≥ 0.29 (only for the `prefix C` dashboard). With fzf ≥ 0.40 the
+  header shows the current wait-time order, and with fzf ≥ 0.71 the cursor
+  stays on the same session when the list reloads.
 - Claude Code with the `PermissionRequest`, `StopFailure` and
   `PostToolUseFailure` hooks
 
