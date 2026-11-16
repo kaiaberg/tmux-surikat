@@ -129,11 +129,20 @@ check "uninstall removes copies" test ! -e "$HOME/.local/bin/surikat"
 # drops ones from an earlier install.sh run.
 "$REPO/install.sh" >/dev/null 2>&1
 jq '.enabledPlugins = {"surikat@tmux-surikat": true}' "$S" >"$T/s.json" && mv "$T/s.json" "$S"
+PLUG=$HOME/.claude/plugins/cache/tmux-surikat/surikat/0.1.0/bin
+mkdir -p "$PLUG" && cp "$REPO/bin/surikat-hook" "$PLUG/"
 "$REPO/install.sh" >"$T/plugin.out" 2>&1
 check "plugin enabled: install succeeds" test $? -eq 0
 check "plugin enabled: says why" grep -q 'plugin is enabled' "$T/plugin.out"
 check "plugin enabled: no surikat hooks in settings" test "$(jq '[.hooks // {} | .[][] .hooks[] | select(.command | test("surikat-hook"))] | length' "$S")" = 0
 check "plugin enabled: tmux side still installed" grep -qxF 'source-file -q ~/.tmux/surikat.conf' "$HOME/.tmux.conf"
+check "plugin enabled: says to re-run after uninstalling it" grep -q 'run ./install.sh again' "$T/plugin.out"
+
+# Enabled in settings, but the plugin files are gone: warn and add the hooks.
+rm -rf "$HOME/.claude/plugins"
+"$REPO/install.sh" >"$T/gone.out" 2>&1
+check "plugin missing: warns" grep -q "no hooks would run" "$T/gone.out"
+check "plugin missing: hooks added" test "$(jq '[.hooks // {} | .[][] .hooks[] | select(.command | test("surikat-hook"))] | length' "$S")" -gt 0
 "$REPO/install.sh" --uninstall >/dev/null 2>&1
 
 # Invalid settings: refuse, change nothing.

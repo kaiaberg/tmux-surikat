@@ -155,6 +155,10 @@ the result as an estimate:
 - The status bar glyph is updated by `surikat --count` in `status-right`,
   so it can lag by up to `status-interval` (5 s).
 
+If the column stays empty, `touch ~/.local/state/surikat/$(hostname -s)/debug`,
+finish a turn, and read `debug.log` next to it: each hook call logs the
+transcript it read and what it found. Remove `debug` to stop logging.
+
 ## Requirements
 
 - **Linux or macOS**, any terminal, tmux local or on a remote machine over

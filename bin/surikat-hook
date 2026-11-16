@@ -171,12 +171,17 @@ fi
 # tail of the transcript. The cache goes cold about cache_ttl seconds after
 # cache_at. The transcript format is internal to Claude Code, so anything
 # unexpected just leaves the fields as they were.
+#
+# Debugging: `touch <state dir>/debug` and each hook call appends what it
+# saw to <state dir>/debug.log; remove the file to stop.
+dbg=/dev/null
+[ -e "$dir/debug" ] && dbg=$dir/debug.log
 cache='{}'
 case $state in
   done | perm | ask | idle)
     if [ -n "$tp" ] && [ -f "$tp" ] && [ -r "$tp" ]; then
       # shellcheck disable=SC2016
-      cache=$(tail -c 1000000 "$tp" | jq -cRn '
+      cache=$(tail -c 1000000 "$tp" 2>>"$dbg" | jq -cRn 2>>"$dbg" '
         [inputs | try fromjson catch empty
          | select(type == "object" and .type == "assistant" and (.isSidechain | not)
                   and (.message.model // "") != "<synthetic>"
@@ -194,6 +199,18 @@ case $state in
     fi
     ;;
 esac
+if [ "$dbg" != /dev/null ]; then
+  {
+    printf '%s %s sid=%s state=%s cache=%s\n' "$(date '+%F %T')" "$event" "$sid" "$state" "$cache"
+    printf '  transcript=%s' "${tp:-<none>}"
+    if [ -n "$tp" ]; then
+      [ -r "$tp" ] && printf ' (%s bytes, %s assistant lines)' "$(wc -c <"$tp" | tr -d ' ')" \
+        "$(grep -c '"type":"assistant"' "$tp")" || printf ' (not readable)'
+    fi
+    printf '\n  jq=%s (%s) bash=%s script=%s\n' "$(command -v jq)" "$(jq --version 2>&1)" \
+      "$BASH_VERSION" "$0"
+  } >>"$dbg" 2>&1
+fi
 
 target='' wname='' socket=''
 if [ -n "$pane" ] && command -v tmux >/dev/null 2>&1; then

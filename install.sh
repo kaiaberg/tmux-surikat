@@ -291,6 +291,13 @@ plugin_enabled() {
   [ -f "$CLAUDE_SETTINGS" ] &&
     jq -e --arg p "$PLUGIN_ID" '.enabledPlugins[$p] == true' "$CLAUDE_SETTINGS" >/dev/null 2>&1
 }
+# Whether the plugin's files are actually there. Enabled in settings but
+# missing (e.g. a removed plugin cache) means no hooks would run at all.
+plugin_installed() {
+  local d
+  d=$(dirname "$CLAUDE_SETTINGS")/plugins
+  [ -d "$d" ] && [ -n "$(find "$d" -path '*tmux-surikat*' -name surikat-hook 2>/dev/null | head -n 1)" ]
+}
 
 merge_settings() {
   local action=$1 new=$TMPD/settings.json orig=$TMPD/settings.orig
@@ -349,10 +356,16 @@ remove_state() {
 if [ $mode = install ]; then
   check_requirements
   install_scripts
-  if plugin_enabled; then
+  if plugin_enabled && plugin_installed; then
     say "hooks: the surikat Claude Code plugin is enabled and provides them"
+    say "  If you uninstall the plugin later, run ./install.sh again to add them here."
     merge_settings strip
   else
+    if plugin_enabled; then
+      say "warning: the surikat plugin is enabled in $CLAUDE_SETTINGS but not"
+      say "  installed under $(dirname "$CLAUDE_SETTINGS")/plugins, so no hooks would run."
+      say "  Adding them to settings.json instead."
+    fi
     merge_settings add
   fi
   install_tmux_conf

@@ -196,6 +196,12 @@ check "junk transcript: record still written" eq "$(field c2 state)" 'done'
 check "junk transcript: no cache fields" eq "$(field c2 cache_at)" ""
 hook start "$P1" "$(js c1 '{source: "compact"}')"
 check "compaction clears cache_at" eq "$(field c1 cache_at)" ""
+touch "$SURIKAT_DIR/debug"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/h1.jsonl\"}")"
+check "debug log names the transcript" grep -q "transcript=$TR/h1.jsonl (" "$SURIKAT_DIR/debug.log"
+check "debug log shows the cache result" grep -q 'cache={"cache_at"' "$SURIKAT_DIR/debug.log"
+check "debug log is not a record" test ! -e "$SURIKAT_DIR/debug.json"
+rm -f "$SURIKAT_DIR/debug" "$SURIKAT_DIR/debug.log"
 
 echo "--- robustness"
 reset_state
