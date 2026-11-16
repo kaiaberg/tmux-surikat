@@ -118,6 +118,37 @@ bind F run-shell "~/.local/bin/surikat --fav '#{pane_id}'"
 bind S run-shell "~/.local/bin/surikat --side '#{pane_id}'"
 ```
 
+### Cache warmth (experimental)
+
+Claude's prompt cache expires a fixed time after the last request: 5
+minutes or 1 hour, depending on the session. Once it's cold, your next
+prompt in that session re-writes the whole context at the cache-write price
+instead of the much cheaper cache-read price. For waiting sessions (●/◆/◐/✓)
+the dashboard, `--list` and `--watch` show an estimate of the time left:
+
+```
+  ✓ 3m   ❄57m  0:3.1    api          api          All done.
+  ◐ 9m   ❄cold 0:4.1    web          web          rate_limit
+```
+
+It's dim while warm, yellow below a threshold, and red once cold. Set the
+threshold in minutes in `~/.tmux.conf`:
+
+```tmux
+set -g @surikat_cache_warn 10   # default 5
+```
+
+When a session starts waiting, the hook reads the tail of its transcript:
+the time of the last API request and the TTL of its last cache write. Treat
+the result as an estimate:
+
+- The server can evict a cache before its TTL runs out.
+- The transcript format is internal to Claude Code. If it changes, the
+  column stays empty instead of showing wrong numbers.
+- A `/model` switch while a session waits isn't seen, and it makes the next
+  prompt cold anyway.
+- The dashboard shows the time when it opened; `ctrl-r` refreshes it.
+
 ## Requirements
 
 - **Linux or macOS**, any terminal, tmux local or on a remote machine over

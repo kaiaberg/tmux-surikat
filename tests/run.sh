@@ -140,6 +140,52 @@ hook end "$P1" "$(js s1 '{reason: "exit"}')"
 check "end removes the record" test ! -e "$SURIKAT_DIR/s1.json"
 check "end unsets the pane option" eq "$(popt "$P1")" ""
 
+echo "--- cache warmth"
+reset_state
+TR=$T/transcripts
+mkdir -p "$TR"
+now=$(date +%s)
+iso() { jq -nr --argjson t "$1" '$t | todate | sub("Z$"; ".123Z")'; }
+# asst EPOCH H1 M5: one assistant transcript line with that cache write.
+asst() {
+  jq -nc --arg ts "$(iso "$1")" --argjson h "$2" --argjson m "$3" \
+    '{type: "assistant", timestamp: $ts, message: {model: "m", usage: {input_tokens: 1,
+      cache_creation: {ephemeral_1h_input_tokens: $h, ephemeral_5m_input_tokens: $m}}}}'
+}
+{
+  echo 'truncated line from the tail cut {"type":'
+  asst $((now - 900)) 500 0
+  echo '{"type":"user","timestamp":"x","message":{}}'
+  asst $((now - 120)) 0 0
+  jq -nc '{type: "assistant", timestamp: "x", message: {model: "<synthetic>", usage: {}}}'
+} >"$TR/h1.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/h1.jsonl\"}")"
+check "cache_at from the last real assistant entry" eq "$(field c1 cache_at)" $((now - 120))
+check "cache_ttl from the last cache write (1h)" eq "$(field c1 cache_ttl)" 3600
+check "warm cache shown in minutes" sh -c "'$BIN/surikat' --list | grep -q '❄5[78]m'"
+asst $((now - 30)) 0 800 >"$TR/m5.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/m5.jsonl\"}")"
+check "cache_ttl 5m" eq "$(field c1 cache_ttl)" 300
+asst $((now - 400)) 0 0 >"$TR/old.jsonl"
+hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/old.jsonl\"}")"
+check "reads only: previous TTL kept" eq "$(field c1 cache_ttl)" 300
+check "past the TTL: cold" sh -c "'$BIN/surikat' --list | grep -q '❄cold'"
+check "cold is red" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[31m❄cold\""
+setf c1 ".cache_at = $((now - 60)) | .cache_ttl = 3600"
+check "under the warn threshold: yellow" sh -c "SURIKAT_CACHE_WARN=60 '$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[33m❄5[89]m\""
+check "above it: dim" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[2m❄5[89]m\""
+hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
+check "running rows show no cache" sh -c "! '$BIN/surikat' --list | grep -q '❄'"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/missing.jsonl\"}")"
+check "missing transcript keeps the fields" eq "$(field c1 cache_ttl)" 3600
+printf 'not json\n' >"$TR/junk.jsonl"
+hook stop "$P2" "$(js c2 "{transcript_path: \"$TR/junk.jsonl\"}")"
+check "junk transcript: record still written" eq "$(field c2 state)" 'done'
+check "junk transcript: no cache fields" eq "$(field c2 cache_at)" ""
+hook start "$P1" "$(js c1 '{source: "compact"}')"
+check "compaction clears cache_at" eq "$(field c1 cache_at)" ""
+
 echo "--- robustness"
 reset_state
 printf '{ not json' | TMUX_PANE=$P1 "$BIN/surikat-hook" start

@@ -21,6 +21,10 @@
 # Look: `set -g @surikat_style glyph|nerd|emoji` and per-state colors as
 # tmux styles, e.g. `set -g @surikat_color_perm 'fg=red,bold'`.
 #
+# Cache warmth (experimental): waiting rows show ❄12m, the estimated time
+# until the session's prompt cache goes cold; `set -g @surikat_cache_warn 10`
+# turns it yellow under 10 minutes (default 5).
+#
 # Internal: --rows [--state FILE], --header FILE, --flip FILE,
 #           --preview PANE, --jump [--record] PANE, --seen PANE,
 #           --tmux-icon, --tmux-mark
@@ -206,6 +210,16 @@ def age_sgr: if pri > 2 then "2" else secs as $s
 def age: secs as $s
   | if $s < 60 then "\($s)s" elif $s < 3600 then "\($s / 60 | floor)m"
     elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
+# Cache warmth (experimental): seconds until the prompt cache of a waiting
+# session goes cold, or null. An unknown TTL counts as the shorter 5m one.
+def cache_left: if (.cache_at | type) == "number" and pri <= 2
+  then .cache_at + (.cache_ttl // 300) - now | floor else null end;
+def cache_cell: cache_left as $l
+  | if $l == null then "" elif $l <= 0 then "cold" elif $l < 60 then "\($l)s"
+    else "\($l / 60 | floor)m" end;
+# Dim while warm, yellow under the warn threshold, red once cold.
+def cache_sgr($warn): cache_left as $l
+  | if $l == null then "" elif $l <= 0 then "31" elif $l < $warn then "33" else "2" end;
 def pad($n): if length >= $n then . else . + (" " * ($n - length)) end;
 def fit($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else pad($n) end;
 def cut($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else . end;
@@ -283,6 +297,16 @@ pane_side() {
     *" $1 "*) return 0 ;;
   esac
   return 1
+}
+
+# Cache warn threshold in seconds (@surikat_cache_warn, minutes, default 5).
+cache_warn() {
+  local m=${SURIKAT_CACHE_WARN:-}
+  [ -n "$m" ] || m=$(tmux show -gv @surikat_cache_warn 2>/dev/null)
+  case $m in
+    '' | *[!0-9]*) m=5 ;;
+  esac
+  echo $((m * 60))
 }
 
 # Wait-time direction: asc (shortest wait first, the default) or desc.
@@ -365,14 +389,16 @@ width() {
 # at the top. With a socket, only records of that tmux server (jumpable
 # ones). Needs load_live (MARKS). ROWS_ANSI=1 dims sidelined rows.
 rows() {
-  local sock=${1:-} order=${2:-} w
+  local sock=${1:-} order=${2:-} w cw
   w=$(width)
+  cw=$(cache_warn)
   [ -n "$order" ] || order=$(default_order)
   theme
   # shellcheck disable=SC2016
   jq_records -r -s --arg sock "$sock" --argjson w "$w" --argjson marks "$MARKS" \
-    --arg order "$order" --arg ansi "${ROWS_ANSI:-0}" --argjson th "$TH_JSON" "$JQ_DEFS"'
-    ($w - 47) as $mw
+    --arg order "$order" --arg ansi "${ROWS_ANSI:-0}" --argjson th "$TH_JSON" \
+    --argjson cw "$cw" "$JQ_DEFS"'
+    ($w - 53) as $mw
     | map(select($sock == "" or (.socket // "") == $sock)) | ordered($marks; $order) | .[]
     | ((.message // "") | if . == "" then "" else . end) as $m
     | (if $m == "" then (.prompt // "") else $m end) as $msg
@@ -380,7 +406,10 @@ rows() {
     | (if $side and $ansi == "1" then "\u001b[2m" else "" end) as $re
     | age_sgr as $agec
     | (age | fit(4) | if $side then . else paint($agec; $re) end) as $age
-    | "\(mark_icon($marks; $re)) \(icon($re)) \($age) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))" as $line
+    | cache_sgr($cw) as $cachec
+    | (cache_cell | if . == "" then . else "❄" + . end | fit(5)
+       | if $side then . else paint($cachec; $re) end) as $cache
+    | "\(mark_icon($marks; $re)) \(icon($re)) \($age) \($cache) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))" as $line
     | "\(.pane // "")\t" + (if $re != "" then "\($re)\($line)\u001b[0m" else $line end)'
 }
 
@@ -703,7 +732,7 @@ watch_loop() {
   done
 }
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --client NAME may appear anywhere.
 args=()

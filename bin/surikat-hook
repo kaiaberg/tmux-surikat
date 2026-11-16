@@ -40,7 +40,7 @@ pane=${TMUX_PANE:-}
 US=$'\x1f'
 
 # One jq call decides everything. Output: a decision line
-# "noop" | "end" | "write<US>state<US>prev<US>pid", then the new record.
+# "noop" | "end" | "write<US>state<US>prev<US>pid<US>transcript", then the new record.
 # shellcheck disable=SC2016
 PROG='
 def clean: tostring | gsub("[[:cntrl:]]+"; " ") | gsub("^ +| +$"; "") | .[0:300];
@@ -105,8 +105,10 @@ def questions:
           prompt: ($d.prompt // $p.prompt // ""),
           pending: (if $d | has("pending") then $d.pending else ($p.pending // "") end)
         }
-        | .project = (.cwd | sub("/+$"; "") | split("/") | last // ""))
-      | ("write\u001f\(.state)\u001f\($prev)\u001f\(.pid // "")", tojson)
+        | .project = (.cwd | sub("/+$"; "") | split("/") | last // "")
+        | if $ev == "start" and ($in.source // "") == "compact" then del(.cache_at) else . end)
+      | ($in.transcript_path // "" | tostring | gsub("[[:cntrl:]]"; "")) as $tp
+      | ("write\u001f\(.state)\u001f\($prev)\u001f\(.pid // "")\u001f\($tp)", tojson)
     end
   end
 '
@@ -127,7 +129,7 @@ out=$(decide 1) || out=$(decide 0) || exit 0
 decision=${out%%$'\n'*}
 record=${out#*$'\n'}
 
-IFS=$US read -r action state _ oldpid <<<"$decision"
+IFS=$US read -r action state _ oldpid tp <<<"$decision"
 
 case $action in
   noop) exit 0 ;;
@@ -164,6 +166,35 @@ if [ "$event" = start ] || [ -z "$oldpid" ]; then
   [[ $pid =~ ^[0-9]+$ ]] || pid=
 fi
 
+# Cache warmth (experimental): when a session starts waiting, note when its
+# last API request was made and the prompt-cache TTL it used, read from the
+# tail of the transcript. The cache goes cold about cache_ttl seconds after
+# cache_at. The transcript format is internal to Claude Code, so anything
+# unexpected just leaves the fields as they were.
+cache='{}'
+case $state in
+  done | perm | ask | idle)
+    if [ -n "$tp" ] && [ -f "$tp" ] && [ -r "$tp" ]; then
+      # shellcheck disable=SC2016
+      cache=$(tail -c 1000000 "$tp" | jq -cRn '
+        [inputs | try fromjson catch empty
+         | select(type == "object" and .type == "assistant" and (.isSidechain | not)
+                  and (.message.model // "") != "<synthetic>"
+                  and (.message.usage | type) == "object")
+         | {t: .timestamp, c: (.message.usage.cache_creation // {})}] as $a
+        | if $a == [] then {} else
+            ([$a[].c | if (.ephemeral_1h_input_tokens // 0) > 0 then 3600
+                       elif (.ephemeral_5m_input_tokens // 0) > 0 then 300
+                       else empty end] | last) as $ttl
+            | (try ($a[-1].t | sub("\\.[0-9]+"; "") | fromdateiso8601 | floor) catch null) as $at
+            | (if $at != null then {cache_at: $at} else {} end)
+              + (if $ttl != null then {cache_ttl: $ttl} else {} end)
+          end') || cache='{}'
+      [ -n "$cache" ] || cache='{}'
+    fi
+    ;;
+esac
+
 target='' wname='' socket=''
 if [ -n "$pane" ] && command -v tmux >/dev/null 2>&1; then
   info=$(tmux set -p -t "$pane" @surikat "$state" \; \
@@ -173,8 +204,10 @@ fi
 
 tmp=$file.tmp.$$
 # shellcheck disable=SC2016
-if printf '%s' "$record" | jq -c --arg pid "$pid" --arg t "$target" --arg w "$wname" --arg s "$socket" '
-    (if $pid != "" then .pid = ($pid | tonumber) else . end)
+if printf '%s' "$record" | jq -c --arg pid "$pid" --arg t "$target" --arg w "$wname" --arg s "$socket" \
+  --argjson c "$cache" '
+    . + $c
+    | (if $pid != "" then .pid = ($pid | tonumber) else . end)
     | (if $t != "" then .tmux_target = $t | .window_name = $w | .socket = $s else . end)
   ' >"$tmp"; then
   mv -f "$tmp" "$file"
