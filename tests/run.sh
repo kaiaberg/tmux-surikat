@@ -166,10 +166,43 @@ check "warm cache shown in minutes" sh -c "'$BIN/surikat' --list | grep -q '❄5
 asst $((now - 30)) 0 800 >"$TR/m5.jsonl"
 hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/m5.jsonl\"}")"
 check "cache_ttl 5m" eq "$(field c1 cache_ttl)" 300
+hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
+asst "$(date +%s)" 0 0 >"$TR/reads.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/reads.jsonl\"}")"
+check "reads only: previous TTL kept" eq "$(field c1 cache_ttl)" 300
+check "reads only: request time of this turn" lt $(($(date +%s) - $(field c1 cache_at))) 3
 asst $((now - 400)) 0 0 >"$TR/old.jsonl"
 hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
 hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/old.jsonl\"}")"
-check "reads only: previous TTL kept" eq "$(field c1 cache_ttl)" 300
+check "an older turn's entry is not used" eq "$(field c1 cache_at)" ""
+check "... but its TTL is kept" eq "$(field c1 cache_ttl)" 300
+# waitf SID FIELD: wait up to 5s for a record field to be set.
+waitf() {
+  local i=0
+  while [ -z "$(field "$1" "$2")" ] && [ $i -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+# The turn reaches the transcript only after the Stop hook (some versions).
+jq -nc '{type: "user", timestamp: "x", message: {}}' >"$TR/late.jsonl"
+hook prompt "$P2" "$(js c3 '{prompt: "go"}')"
+hook stop "$P2" "$(js c3 "{transcript_path: \"$TR/late.jsonl\"}")"
+check "turn not written yet: no cache_at" eq "$(field c3 cache_at)" ""
+asst "$(date +%s)" 700 0 >>"$TR/late.jsonl"
+waitf c3 cache_at
+check "turn written later: retry fills cache_at" test -n "$(field c3 cache_at)"
+check "turn written later: retry fills cache_ttl" eq "$(field c3 cache_ttl)" 3600
+check "retry keeps the record" eq "$(field c3 state)" 'done'
+jq -nc '{type: "user", timestamp: "x", message: {}}' >"$TR/late2.jsonl"
+hook prompt "$P2" "$(js c3 '{prompt: "go"}')"
+hook stop "$P2" "$(js c3 "{transcript_path: \"$TR/late2.jsonl\"}")"
+check "an older cache_at isn't carried over" eq "$(field c3 cache_at)" ""
+hook prompt "$P2" "$(js c3 '{prompt: "next"}')"
+asst "$(date +%s)" 700 0 >>"$TR/late2.jsonl"
+sleep 2
+check "retry doesn't patch over a newer event" eq "$(field c3 state) cache_at=$(field c3 cache_at)" "running cache_at="
+setf c1 ".cache_at = $((now - 400))"
 check "past the TTL: cold" sh -c "'$BIN/surikat' --list | grep -q '❄cold'"
 check "cold is blue" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[34m❄cold\""
 "$BIN/surikat" --count >/dev/null
@@ -197,8 +230,9 @@ check "junk transcript: no cache fields" eq "$(field c2 cache_at)" ""
 hook start "$P1" "$(js c1 '{source: "compact"}')"
 check "compaction clears cache_at" eq "$(field c1 cache_at)" ""
 touch "$SURIKAT_DIR/debug"
-hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/h1.jsonl\"}")"
-check "debug log names the transcript" grep -q "transcript=$TR/h1.jsonl (" "$SURIKAT_DIR/debug.log"
+asst "$(date +%s)" 1 0 >"$TR/dbg.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/dbg.jsonl\"}")"
+check "debug log names the transcript" grep -q "transcript=$TR/dbg.jsonl (" "$SURIKAT_DIR/debug.log"
 check "debug log shows the cache result" grep -q 'cache={"cache_at"' "$SURIKAT_DIR/debug.log"
 check "debug log is not a record" test ! -e "$SURIKAT_DIR/debug.json"
 rm -f "$SURIKAT_DIR/debug" "$SURIKAT_DIR/debug.log"
