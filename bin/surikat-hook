@@ -135,7 +135,7 @@ case $action in
   noop) exit 0 ;;
   end)
     rm -f "$file"
-    [ -n "$pane" ] && tmux set -pu -t "$pane" @surikat
+    [ -n "$pane" ] && tmux set -pu -t "$pane" @surikat \; set -pu -t "$pane" @surikat_cache
     exit 0
     ;;
   write) ;;
@@ -197,7 +197,8 @@ esac
 
 target='' wname='' socket=''
 if [ -n "$pane" ] && command -v tmux >/dev/null 2>&1; then
-  info=$(tmux set -p -t "$pane" @surikat "$state" \; \
+  # @surikat_cache is cleared on every change; surikat --count sets it again.
+  info=$(tmux set -p -t "$pane" @surikat "$state" \; set -pu -t "$pane" @surikat_cache \; \
     display -p -t "$pane" "#{session_name}:#{window_index}.#{pane_index}${US}#{window_name}${US}#{socket_path}")
   IFS=$US read -r target wname socket <<<"$info"
 fi

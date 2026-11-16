@@ -182,7 +182,7 @@ remove() {
 
   local p
   for p in $(tmux list-panes -a -F '#{pane_id}' 2>/dev/null); do
-    tmux set -pu -t "$p" @surikat \; set -pu -t "$p" @surikat_mark 2>/dev/null
+    tmux set -pu -t "$p" @surikat \; set -pu -t "$p" @surikat_mark \; set -pu -t "$p" @surikat_cache 2>/dev/null
   done
 }
 

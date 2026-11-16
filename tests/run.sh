@@ -171,12 +171,23 @@ hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
 hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/old.jsonl\"}")"
 check "reads only: previous TTL kept" eq "$(field c1 cache_ttl)" 300
 check "past the TTL: cold" sh -c "'$BIN/surikat' --list | grep -q '❄cold'"
-check "cold is red" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[31m❄cold\""
+check "cold is blue" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[34m❄cold\""
+"$BIN/surikat" --count >/dev/null
+check "--count marks a cold pane" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" cold
+check "status bar shows the cold glyph" sh -c "tmux display -p -t '$P1' '#{E:@surikat_pane_icon}' | grep -q 'fg=blue]❄'"
 setf c1 ".cache_at = $((now - 60)) | .cache_ttl = 3600"
 check "under the warn threshold: yellow" sh -c "SURIKAT_CACHE_WARN=60 '$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[33m❄5[89]m\""
 check "above it: dim" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[2m❄5[89]m\""
+"$BIN/surikat" --count >/dev/null
+check "--count clears it while warm" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" ""
+tmux set -g @surikat_cache_warn 60
+"$BIN/surikat" --count >/dev/null
+check "@surikat_cache_warn: cooling" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" cooling
+check "status bar shows the cooling glyph" sh -c "tmux display -p -t '$P1' '#{E:@surikat_pane_icon}' | grep -q 'fg=yellow]❄'"
+tmux set -gu @surikat_cache_warn
 hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
 check "running rows show no cache" sh -c "! '$BIN/surikat' --list | grep -q '❄'"
+check "a state change clears the pane option" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" ""
 hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/missing.jsonl\"}")"
 check "missing transcript keeps the fields" eq "$(field c1 cache_ttl)" 3600
 printf 'not json\n' >"$TR/junk.jsonl"
