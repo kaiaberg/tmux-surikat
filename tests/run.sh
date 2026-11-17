@@ -140,6 +140,103 @@ hook end "$P1" "$(js s1 '{reason: "exit"}')"
 check "end removes the record" test ! -e "$SURIKAT_DIR/s1.json"
 check "end unsets the pane option" eq "$(popt "$P1")" ""
 
+echo "--- cache warmth"
+reset_state
+TR=$T/transcripts
+mkdir -p "$TR"
+now=$(date +%s)
+iso() { jq -nr --argjson t "$1" '$t | todate | sub("Z$"; ".123Z")'; }
+# asst EPOCH H1 M5: one assistant transcript line with that cache write.
+asst() {
+  jq -nc --arg ts "$(iso "$1")" --argjson h "$2" --argjson m "$3" \
+    '{type: "assistant", timestamp: $ts, message: {model: "m", usage: {input_tokens: 1,
+      cache_creation: {ephemeral_1h_input_tokens: $h, ephemeral_5m_input_tokens: $m}}}}'
+}
+{
+  echo 'truncated line from the tail cut {"type":'
+  asst $((now - 900)) 500 0
+  echo '{"type":"user","timestamp":"x","message":{}}'
+  asst $((now - 120)) 0 0
+  jq -nc '{type: "assistant", timestamp: "x", message: {model: "<synthetic>", usage: {}}}'
+} >"$TR/h1.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/h1.jsonl\"}")"
+check "cache_at from the last real assistant entry" eq "$(field c1 cache_at)" $((now - 120))
+check "cache_ttl from the last cache write (1h)" eq "$(field c1 cache_ttl)" 3600
+check "warm cache shown in minutes" sh -c "'$BIN/surikat' --list | grep -q '❄5[78]m'"
+asst $((now - 30)) 0 800 >"$TR/m5.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/m5.jsonl\"}")"
+check "cache_ttl 5m" eq "$(field c1 cache_ttl)" 300
+hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
+asst "$(date +%s)" 0 0 >"$TR/reads.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/reads.jsonl\"}")"
+check "reads only: previous TTL kept" eq "$(field c1 cache_ttl)" 300
+check "reads only: request time of this turn" lt $(($(date +%s) - $(field c1 cache_at))) 3
+asst $((now - 400)) 0 0 >"$TR/old.jsonl"
+hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/old.jsonl\"}")"
+check "an older turn's entry is not used" eq "$(field c1 cache_at)" ""
+check "... but its TTL is kept" eq "$(field c1 cache_ttl)" 300
+# waitf SID FIELD: wait up to 5s for a record field to be set.
+waitf() {
+  local i=0
+  while [ -z "$(field "$1" "$2")" ] && [ $i -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+# The turn reaches the transcript only after the Stop hook (some versions).
+jq -nc '{type: "user", timestamp: "x", message: {}}' >"$TR/late.jsonl"
+hook prompt "$P2" "$(js c3 '{prompt: "go"}')"
+hook stop "$P2" "$(js c3 "{transcript_path: \"$TR/late.jsonl\"}")"
+check "turn not written yet: no cache_at" eq "$(field c3 cache_at)" ""
+asst "$(date +%s)" 700 0 >>"$TR/late.jsonl"
+waitf c3 cache_at
+check "turn written later: retry fills cache_at" test -n "$(field c3 cache_at)"
+check "turn written later: retry fills cache_ttl" eq "$(field c3 cache_ttl)" 3600
+check "retry keeps the record" eq "$(field c3 state)" 'done'
+jq -nc '{type: "user", timestamp: "x", message: {}}' >"$TR/late2.jsonl"
+hook prompt "$P2" "$(js c3 '{prompt: "go"}')"
+hook stop "$P2" "$(js c3 "{transcript_path: \"$TR/late2.jsonl\"}")"
+check "an older cache_at isn't carried over" eq "$(field c3 cache_at)" ""
+hook prompt "$P2" "$(js c3 '{prompt: "next"}')"
+asst "$(date +%s)" 700 0 >>"$TR/late2.jsonl"
+sleep 2
+check "retry doesn't patch over a newer event" eq "$(field c3 state) cache_at=$(field c3 cache_at)" "running cache_at="
+setf c1 ".cache_at = $((now - 400))"
+check "past the TTL: cold" sh -c "'$BIN/surikat' --list | grep -q '❄cold'"
+check "cold is blue" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[34m❄cold\""
+"$BIN/surikat" --count >/dev/null
+check "--count marks a cold pane" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" cold
+check "status bar shows the cold glyph" sh -c "tmux display -p -t '$P1' '#{E:@surikat_pane_icon}' | grep -q 'fg=blue]❄'"
+setf c1 ".cache_at = $((now - 60)) | .cache_ttl = 3600"
+check "under the warn threshold: yellow" sh -c "SURIKAT_CACHE_WARN=60 '$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[33m❄5[89]m\""
+check "above it: dim" sh -c "'$BIN/surikat' --rows | grep -q \"$(printf '\033')\\[2m❄5[89]m\""
+"$BIN/surikat" --count >/dev/null
+check "--count clears it while warm" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" ""
+tmux set -g @surikat_cache_warn 60
+"$BIN/surikat" --count >/dev/null
+check "@surikat_cache_warn: cooling" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" cooling
+check "status bar shows the cooling glyph" sh -c "tmux display -p -t '$P1' '#{E:@surikat_pane_icon}' | grep -q 'fg=yellow]❄'"
+tmux set -gu @surikat_cache_warn
+hook prompt "$P1" "$(js c1 '{prompt: "go"}')"
+check "running rows show no cache" sh -c "! '$BIN/surikat' --list | grep -q '❄'"
+check "a state change clears the pane option" eq "$(tmux display -p -t "$P1" '#{@surikat_cache}')" ""
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/missing.jsonl\"}")"
+check "missing transcript keeps the fields" eq "$(field c1 cache_ttl)" 3600
+printf 'not json\n' >"$TR/junk.jsonl"
+hook stop "$P2" "$(js c2 "{transcript_path: \"$TR/junk.jsonl\"}")"
+check "junk transcript: record still written" eq "$(field c2 state)" 'done'
+check "junk transcript: no cache fields" eq "$(field c2 cache_at)" ""
+hook start "$P1" "$(js c1 '{source: "compact"}')"
+check "compaction clears cache_at" eq "$(field c1 cache_at)" ""
+touch "$SURIKAT_DIR/debug"
+asst "$(date +%s)" 1 0 >"$TR/dbg.jsonl"
+hook stop "$P1" "$(js c1 "{transcript_path: \"$TR/dbg.jsonl\"}")"
+check "debug log names the transcript" grep -q "transcript=$TR/dbg.jsonl (" "$SURIKAT_DIR/debug.log"
+check "debug log shows the cache result" grep -q 'cache={"cache_at"' "$SURIKAT_DIR/debug.log"
+check "debug log is not a record" test ! -e "$SURIKAT_DIR/debug.json"
+rm -f "$SURIKAT_DIR/debug" "$SURIKAT_DIR/debug.log"
+
 echo "--- robustness"
 reset_state
 printf '{ not json' | TMUX_PANE=$P1 "$BIN/surikat-hook" start

@@ -40,7 +40,8 @@ pane=${TMUX_PANE:-}
 US=$'\x1f'
 
 # One jq call decides everything. Output: a decision line
-# "noop" | "end" | "write<US>state<US>prev<US>pid", then the new record.
+# "noop" | "end" | "write<US>state<US>prev<US>pid<US>transcript<US>prompt_at<US>ts",
+# then the new record.
 # shellcheck disable=SC2016
 PROG='
 def clean: tostring | gsub("[[:cntrl:]]+"; " ") | gsub("^ +| +$"; "") | .[0:300];
@@ -103,10 +104,13 @@ def questions:
           cwd: ($in.cwd // $p.cwd // ""),
           message: (if $d.msg == "" and $d.state == $prev then ($p.message // "") else $d.msg end),
           prompt: ($d.prompt // $p.prompt // ""),
-          pending: (if $d | has("pending") then $d.pending else ($p.pending // "") end)
+          pending: (if $d | has("pending") then $d.pending else ($p.pending // "") end),
+          prompt_at: (if $ev == "prompt" then $now else ($p.prompt_at // 0) end)
         }
-        | .project = (.cwd | sub("/+$"; "") | split("/") | last // ""))
-      | ("write\u001f\(.state)\u001f\($prev)\u001f\(.pid // "")", tojson)
+        | .project = (.cwd | sub("/+$"; "") | split("/") | last // "")
+        | if $ev == "start" and ($in.source // "") == "compact" then del(.cache_at) else . end)
+      | ($in.transcript_path // "" | tostring | gsub("[[:cntrl:]]"; "")) as $tp
+      | ("write\u001f\(.state)\u001f\($prev)\u001f\(.pid // "")\u001f\($tp)\u001f\(.prompt_at)\u001f\(.ts)", tojson)
     end
   end
 '
@@ -127,13 +131,13 @@ out=$(decide 1) || out=$(decide 0) || exit 0
 decision=${out%%$'\n'*}
 record=${out#*$'\n'}
 
-IFS=$US read -r action state _ oldpid <<<"$decision"
+IFS=$US read -r action state _ oldpid tp prompt_at ts <<<"$decision"
 
 case $action in
   noop) exit 0 ;;
   end)
     rm -f "$file"
-    [ -n "$pane" ] && tmux set -pu -t "$pane" @surikat
+    [ -n "$pane" ] && tmux set -pu -t "$pane" @surikat \; set -pu -t "$pane" @surikat_cache
     exit 0
     ;;
   write) ;;
@@ -164,20 +168,123 @@ if [ "$event" = start ] || [ -z "$oldpid" ]; then
   [[ $pid =~ ^[0-9]+$ ]] || pid=
 fi
 
+# Cache warmth (experimental): when a session starts waiting, note when its
+# last API request was made and the prompt-cache TTL it used, read from the
+# tail of the transcript. The cache goes cold about cache_ttl seconds after
+# cache_at. The transcript format is internal to Claude Code, so anything
+# unexpected just leaves the fields as they were.
+#
+# Some Claude Code versions write the turn to the transcript only after the
+# Stop hook ran. Then the newest entry is older than the turn (prompt_at), so
+# it isn't used, and a detached retry patches the record once it shows up.
+#
+# Debugging: `touch <state dir>/debug` and each hook call appends what it
+# saw to <state dir>/debug.log; remove the file to stop.
+dbg=/dev/null
+[ -e "$dir/debug" ] && dbg=$dir/debug.log
+log() { [ "$dbg" = /dev/null ] || printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$dbg" 2>&1; }
+
+# read_cache: {cache_at, cache_ttl} from the transcript, or {}.
+read_cache() {
+  local c=''
+  if [ -n "$tp" ] && [ -f "$tp" ] && [ -r "$tp" ]; then
+    # shellcheck disable=SC2016
+    c=$(tail -c 1000000 "$tp" 2>>"$dbg" | jq -cRn 2>>"$dbg" '
+      [inputs | try fromjson catch empty
+       | select(type == "object" and .type == "assistant" and (.isSidechain | not)
+                and (.message.model // "") != "<synthetic>"
+                and (.message.usage | type) == "object")
+       | {t: .timestamp, c: (.message.usage.cache_creation // {})}] as $a
+      | if $a == [] then {} else
+          ([$a[].c | if (.ephemeral_1h_input_tokens // 0) > 0 then 3600
+                     elif (.ephemeral_5m_input_tokens // 0) > 0 then 300
+                     else empty end] | last) as $ttl
+          | (try ($a[-1].t | sub("\\.[0-9]+"; "") | fromdateiso8601 | floor) catch null) as $at
+          | (if $at != null then {cache_at: $at} else {} end)
+            + (if $ttl != null then {cache_ttl: $ttl} else {} end)
+        end') || c=''
+  fi
+  [ -n "$c" ] || c='{}'
+  printf '%s' "$c"
+}
+
+# fresh JSON: its cache_at belongs to the current turn (1s of clock slack).
+fresh() {
+  local re='"cache_at":([0-9]+)'
+  [[ $1 =~ $re ]] || return 1
+  [ "${BASH_REMATCH[1]}" -ge $((${prompt_at:-0} - 1)) ] 2>/dev/null
+}
+
+cache='{}' stale=0
+case $state in
+  done | perm | ask | idle)
+    cache=$(read_cache)
+    if ! fresh "$cache"; then
+      stale=1
+      # Keep a TTL it found, but not an older turn's request time.
+      cache=$(printf '%s' "$cache" | jq -c 'del(.cache_at)' 2>/dev/null) || cache='{}'
+      [ -n "$cache" ] || cache='{}'
+    fi
+    ;;
+esac
+if [ "$dbg" != /dev/null ]; then
+  {
+    printf '%s %s sid=%s state=%s cache=%s stale=%s prompt_at=%s\n' "$(date '+%F %T')" \
+      "$event" "$sid" "$state" "$cache" "$stale" "$prompt_at"
+    printf '  transcript=%s' "${tp:-<none>}"
+    if [ -n "$tp" ]; then
+      [ -r "$tp" ] && printf ' (%s bytes, %s assistant lines)' "$(wc -c <"$tp" | tr -d ' ')" \
+        "$(grep -c '"type":"assistant"' "$tp")" || printf ' (not readable)'
+    fi
+    printf '\n  jq=%s (%s) bash=%s script=%s\n' "$(command -v jq)" "$(jq --version 2>&1)" \
+      "$BASH_VERSION" "$0"
+  } >>"$dbg" 2>&1
+fi
+
 target='' wname='' socket=''
 if [ -n "$pane" ] && command -v tmux >/dev/null 2>&1; then
-  info=$(tmux set -p -t "$pane" @surikat "$state" \; \
+  # @surikat_cache is cleared on every change; surikat --count sets it again.
+  info=$(tmux set -p -t "$pane" @surikat "$state" \; set -pu -t "$pane" @surikat_cache \; \
     display -p -t "$pane" "#{session_name}:#{window_index}.#{pane_index}${US}#{window_name}${US}#{socket_path}")
   IFS=$US read -r target wname socket <<<"$info"
 fi
 
 tmp=$file.tmp.$$
 # shellcheck disable=SC2016
-if printf '%s' "$record" | jq -c --arg pid "$pid" --arg t "$target" --arg w "$wname" --arg s "$socket" '
-    (if $pid != "" then .pid = ($pid | tonumber) else . end)
+if printf '%s' "$record" | jq -c --arg pid "$pid" --arg t "$target" --arg w "$wname" --arg s "$socket" \
+  --argjson c "$cache" --arg stale "$stale" '
+    . + $c
+    | (if $stale == "1" then del(.cache_at) else . end)
+    | (if $pid != "" then .pid = ($pid | tonumber) else . end)
     | (if $t != "" then .tmux_target = $t | .window_name = $w | .socket = $s else . end)
   ' >"$tmp"; then
   mv -f "$tmp" "$file"
 fi
 rm -f "$tmp"
+
+# The detached retry (see above): up to ~10s, then give up. It only patches
+# the record this call wrote (same ts and state), so a newer event wins.
+if [ "$stale" = 1 ] && [ -n "$tp" ]; then
+  (
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      sleep 1
+      c=$(read_cache)
+      if fresh "$c"; then
+        t=$file.tmp.r$$
+        # shellcheck disable=SC2016
+        if [ -f "$file" ] && jq -c --argjson c "$c" --argjson ts "$ts" --arg st "$state" \
+          'if .ts == $ts and .state == $st then . + $c else empty end' "$file" >"$t" 2>/dev/null &&
+          [ -s "$t" ]; then
+          mv -f "$t" "$file"
+          log "retry $i: sid=$sid cache=$c"
+        else
+          log "retry $i: sid=$sid record changed meanwhile, not patched"
+        fi
+        rm -f "$t"
+        exit 0
+      fi
+    done
+    log "retry: sid=$sid gave up, no entry for this turn in $tp"
+  ) </dev/null >/dev/null 2>&1 &
+fi
 exit 0

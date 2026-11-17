@@ -86,9 +86,10 @@ set -g @surikat_color_done colour108
 
 Colors are tmux styles (`fg=…`, `bold`, `dim`, …) or a bare color (`red`,
 `brightblue`, `colour208`, `#ff8000`). The names are `perm`, `ask`, `idle`,
-`done`, `running`, `ready` and the marks `fav` and `side`. The 16 named colors
-follow your terminal's color scheme. The dashboard turns them into ANSI
-colors, so a color override applies there too.
+`done`, `running`, `ready`, the marks `fav` and `side`, and the cache glyphs
+`cooling` and `cold`. The 16 named colors follow your terminal's color
+scheme. The dashboard turns them into ANSI colors, so a color override
+applies there too.
 
 ### Sort order
 
@@ -117,6 +118,46 @@ the current pane without opening the dashboard, bind keys of your own, e.g.:
 bind F run-shell "~/.local/bin/surikat --fav '#{pane_id}'"
 bind S run-shell "~/.local/bin/surikat --side '#{pane_id}'"
 ```
+
+### Cache warmth (experimental)
+
+Claude's prompt cache expires a fixed time after the last request: 5
+minutes or 1 hour, depending on the session. Once it's cold, your next
+prompt in that session re-writes the whole context at the cache-write price
+instead of the much cheaper cache-read price. For waiting sessions (●/◆/◐/✓)
+the dashboard, `--list` and `--watch` show an estimate of the time left:
+
+```
+  ✓ 3m   ❄57m  0:3.1    api          api          All done.
+  ◐ 9m   ❄cold 0:4.1    web          web          rate_limit
+```
+
+It's dim while warm, yellow below a threshold, and blue once cold. The
+status bar adds a ❄ after the state icon in those two cases (`✓ ❄ 3:api`):
+yellow while cooling, blue once cold. `@surikat_color_cooling` and
+`@surikat_color_cold` change the colors, and `@surikat_style` the glyph.
+Set the threshold in minutes in `~/.tmux.conf`:
+
+```tmux
+set -g @surikat_cache_warn 10   # default 5
+```
+
+When a session starts waiting, the hook reads the tail of its transcript:
+the time of the last API request and the TTL of its last cache write. Treat
+the result as an estimate:
+
+- The server can evict a cache before its TTL runs out.
+- The transcript format is internal to Claude Code. If it changes, the
+  column stays empty instead of showing wrong numbers.
+- A `/model` switch while a session waits isn't seen, and it makes the next
+  prompt cold anyway.
+- The dashboard shows the time when it opened; `ctrl-r` refreshes it.
+- The status bar glyph is updated by `surikat --count` in `status-right`,
+  so it can lag by up to `status-interval` (5 s).
+
+If the column stays empty, `touch ~/.local/state/surikat/$(hostname -s)/debug`,
+finish a turn, and read `debug.log` next to it: each hook call logs the
+transcript it read and what it found. Remove `debug` to stop logging.
 
 ## Requirements
 

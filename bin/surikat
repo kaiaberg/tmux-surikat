@@ -21,6 +21,10 @@
 # Look: `set -g @surikat_style glyph|nerd|emoji` and per-state colors as
 # tmux styles, e.g. `set -g @surikat_color_perm 'fg=red,bold'`.
 #
+# Cache warmth (experimental): waiting rows show ❄12m, the estimated time
+# until the session's prompt cache goes cold. The status bar adds a yellow ❄
+# under `@surikat_cache_warn` minutes (default 5) and a blue one once cold.
+#
 # Internal: --rows [--state FILE], --header FILE, --flip FILE,
 #           --preview PANE, --jump [--record] PANE, --seen PANE,
 #           --tmux-icon, --tmux-mark
@@ -41,7 +45,7 @@ CLIENT=
 # --- theme: the one table for how states and marks look everywhere.
 # @surikat_style: glyph (default), nerd (needs a Nerd Font) or emoji.
 # @surikat_color_<name>: a tmux style per state or mark (glyph/nerd only).
-THEME_NAMES='perm ask idle done running ready none fav side'
+THEME_NAMES='perm ask idle done running ready none fav side cooling cold'
 THEMED=0 STYLE='' TH_JSON='{}'
 
 # sgr STYLE: tmux style (fg=red,bold,...) -> SGR parameters in SGR ("31;1").
@@ -93,14 +97,14 @@ theme() {
   opts=$(tmux display -p "$fmt" 2>/dev/null)
   STYLE=${SURIKAT_STYLE:-${opts%%"$US"*}}
   case $STYLE in
-    nerd) glyphs='      · ★ ↓' ;;
-    emoji) glyphs='🔴 ❓ 🟡 🟢 ⚙ ⚪ ·  ★ ↓' ;;
+    nerd) glyphs='      · ★ ↓  ' ;;
+    emoji) glyphs='🔴 ❓ 🟡 🟢 ⚙ ⚪ ·  ★ ↓ ⏳ 🧊' ;;
     *)
       STYLE=glyph
-      glyphs='● ◆ ◐ ✓ ◌ ○ · ★ ↓'
+      glyphs='● ◆ ◐ ✓ ◌ ○ · ★ ↓ ❄ ❄'
       ;;
   esac
-  styles='fg=red fg=magenta fg=yellow fg=green dim dim dim fg=yellow dim'
+  styles='fg=red fg=magenta fg=yellow fg=green dim dim dim fg=yellow dim fg=yellow fg=blue'
   opts=${opts#*"$US"}
   set -f
   # shellcheck disable=SC2086
@@ -179,7 +183,12 @@ tmux_icon() {
     out="$out#{?#{==:#{@surikat},$name},${s//,/#,} ,"
     close="$close}"
   done
-  printf '%s%s\n' "$out" "$close"
+  # Cache warmth (experimental): @surikat_cache is kept current by gc.
+  for name in cooling cold; do
+    s=$(paint "$name" "$(glyph "$name")" tmux)
+    close="$close#{?#{==:#{@surikat_cache},$name},${s//,/#,} ,"
+  done
+  printf '%s%s}}\n' "$out" "$close"
 }
 
 # tmux_mark: the favorite / sidelined format for prefix T.
@@ -206,6 +215,19 @@ def age_sgr: if pri > 2 then "2" else secs as $s
 def age: secs as $s
   | if $s < 60 then "\($s)s" elif $s < 3600 then "\($s / 60 | floor)m"
     elif $s < 86400 then "\($s / 3600 | floor)h" else "\($s / 86400 | floor)d" end;
+# Cache warmth (experimental): seconds until the prompt cache of a waiting
+# session goes cold, or null. An unknown TTL counts as the shorter 5m one.
+def cache_left: if (.cache_at | type) == "number" and pri <= 2
+  then .cache_at + (.cache_ttl // 300) - now | floor else null end;
+def cache_cell: cache_left as $l
+  | if $l == null then "" elif $l <= 0 then "cold" elif $l < 60 then "\($l)s"
+    else "\($l / 60 | floor)m" end;
+# Dim while warm, then the cooling / cold theme colors (yellow / blue).
+def cache_state($warn): cache_left as $l
+  | if $l == null then "" elif $l <= 0 then "cold" elif $l < $warn then "cooling" else "warm" end;
+def cache_sgr($warn): cache_state($warn) as $c
+  | if $c == "" then "" elif $c == "warm" then "2"
+    else th($c).a | if . == "" then {"cooling": "33", "cold": "34"}[$c] else . end end;
 def pad($n): if length >= $n then . else . + (" " * ($n - length)) end;
 def fit($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else pad($n) end;
 def cut($n): tostring | if $n <= 0 then "" elif length > $n then .[0:$n - 1] + "…" else . end;
@@ -250,17 +272,18 @@ jq_records() {
   [ -n "$out" ] && echo
 }
 
-# Sets SOCKET, LIVE (" %1 %2 ... "), SIDE (sidelined panes, same format)
-# and MARKS (JSON {"%1": "fav", ...}) for the current tmux server.
-SOCKET='' LIVE='' SIDE='' MARKS='{}'
+# Sets SOCKET, LIVE (" %1 %2 ... "), SIDE (sidelined panes, same format),
+# CACHE (" %1=cold ... ", the panes' @surikat_cache) and MARKS (JSON {"%1": "fav", ...}) for the current tmux server.
+SOCKET='' LIVE='' SIDE='' MARKS='{}' CACHE=''
 load_live() {
-  SOCKET='' LIVE=" " SIDE=" " MARKS='{}'
-  local out s p m j=''
-  out=$(tmux list-panes -a -F "#{socket_path}${US}#{pane_id}${US}#{@surikat_mark}" 2>/dev/null) || return 0
-  while IFS=$US read -r s p m; do
+  SOCKET='' LIVE=" " SIDE=" " MARKS='{}' CACHE=" "
+  local out s p m c j=''
+  out=$(tmux list-panes -a -F "#{socket_path}${US}#{pane_id}${US}#{@surikat_mark}${US}#{@surikat_cache}" 2>/dev/null) || return 0
+  while IFS=$US read -r s p m c; do
     [ -n "$p" ] || continue
     SOCKET=$s
     LIVE="$LIVE$p "
+    [ -n "$c" ] && CACHE="$CACHE$p=$c "
     case $m in
       fav | side) j="$j${j:+,}\"$p\":\"$m\"" ;;
     esac
@@ -278,11 +301,27 @@ pane_live() {
   return 1
 }
 
+pane_cache() {
+  local r=${CACHE#*" $1="}
+  [ "$r" = "$CACHE" ] && return 0
+  printf '%s' "${r%% *}"
+}
+
 pane_side() {
   case $SIDE in
     *" $1 "*) return 0 ;;
   esac
   return 1
+}
+
+# Cache warn threshold in seconds (@surikat_cache_warn, minutes, default 5).
+cache_warn() {
+  local m=${SURIKAT_CACHE_WARN:-}
+  [ -n "$m" ] || m=$(tmux show -gv @surikat_cache_warn 2>/dev/null)
+  case $m in
+    '' | *[!0-9]*) m=5 ;;
+  esac
+  echo $((m * 60))
 }
 
 # Wait-time direction: asc (shortest wait first, the default) or desc.
@@ -311,13 +350,18 @@ gc() {
   done
   have_records || return 0
 
-  local lines f sock pane pid state stale drop
+  local lines f sock pane pid state stale cache drop cw tcmd=()
+  cw=$(cache_warn)
   # shellcheck disable=SC2016
-  lines=$(jq_records -r --argjson h "$STALE_HOURS" '
+  lines=$(jq_records -r --argjson h "$STALE_HOURS" --argjson cw "$cw" '
     [input_filename, (.socket // ""), (.pane // ""), (.pid // "" | tostring), (.state // ""),
      (if ((.state // "") | IN("running", "ready")) and (now - (.ts // 0)) > ($h * 3600)
-      then "1" else "0" end)] | join("\u001f")')
-  while IFS=$US read -r f sock pane pid state stale; do
+      then "1" else "0" end),
+     (if ((.state // "") | IN("perm", "ask", "idle", "done")) and (.cache_at | type) == "number"
+      then (.cache_at + (.cache_ttl // 300) - now)
+           | if . <= 0 then "cold" elif . < $cw then "cooling" else "" end
+      else "" end)] | join("\u001f")')
+  while IFS=$US read -r f sock pane pid state stale cache; do
     [ -n "$f" ] || continue
     drop=0
     if [ -n "$pane" ] && [ -n "$SOCKET" ] && [ "$sock" = "$SOCKET" ] && [ "$LIVE" != " " ] &&
@@ -331,14 +375,28 @@ gc() {
     if [ $drop = 1 ]; then
       rm -f "$f"
       if [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_live "$pane"; then
-        tmux set -pu -t "$pane" @surikat 2>/dev/null
+        tmux set -pu -t "$pane" @surikat \; set -pu -t "$pane" @surikat_cache 2>/dev/null
       fi
-    elif ! { [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_side "$pane"; }; then
-      COUNTS="$COUNTS $state"
+    else
+      if ! { [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_side "$pane"; }; then
+        COUNTS="$COUNTS $state"
+      fi
+      # Cache warmth (experimental): keep the pane's @surikat_cache current
+      # for the status-bar glyph, touching only panes that changed.
+      if [ -n "$pane" ] && [ "$sock" = "$SOCKET" ] && pane_live "$pane" &&
+        [ "$cache" != "$(pane_cache "$pane")" ]; then
+        if [ -n "$cache" ]; then
+          tcmd+=(set -p -t "$pane" @surikat_cache "$cache" \;)
+        else
+          tcmd+=(set -pu -t "$pane" @surikat_cache \;)
+        fi
+      fi
     fi
   done <<EOF
 $lines
 EOF
+  [ ${#tcmd[@]} -gt 0 ] && tmux "${tcmd[@]}" 2>/dev/null
+  return 0
 }
 
 # summary [MODE]: e.g. "●2 ✓1"; MODE tmux (default), ansi or plain.
@@ -365,14 +423,16 @@ width() {
 # at the top. With a socket, only records of that tmux server (jumpable
 # ones). Needs load_live (MARKS). ROWS_ANSI=1 dims sidelined rows.
 rows() {
-  local sock=${1:-} order=${2:-} w
+  local sock=${1:-} order=${2:-} w cw
   w=$(width)
+  cw=$(cache_warn)
   [ -n "$order" ] || order=$(default_order)
   theme
   # shellcheck disable=SC2016
   jq_records -r -s --arg sock "$sock" --argjson w "$w" --argjson marks "$MARKS" \
-    --arg order "$order" --arg ansi "${ROWS_ANSI:-0}" --argjson th "$TH_JSON" "$JQ_DEFS"'
-    ($w - 47) as $mw
+    --arg order "$order" --arg ansi "${ROWS_ANSI:-0}" --argjson th "$TH_JSON" \
+    --argjson cw "$cw" "$JQ_DEFS"'
+    ($w - 53) as $mw
     | map(select($sock == "" or (.socket // "") == $sock)) | ordered($marks; $order) | .[]
     | ((.message // "") | if . == "" then "" else . end) as $m
     | (if $m == "" then (.prompt // "") else $m end) as $msg
@@ -380,7 +440,10 @@ rows() {
     | (if $side and $ansi == "1" then "\u001b[2m" else "" end) as $re
     | age_sgr as $agec
     | (age | fit(4) | if $side then . else paint($agec; $re) end) as $age
-    | "\(mark_icon($marks; $re)) \(icon($re)) \($age) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))" as $line
+    | cache_sgr($cw) as $cachec
+    | (cache_cell | if . == "" then . else "❄" + . end | fit(5)
+       | if $side then . else paint($cachec; $re) end) as $cache
+    | "\(mark_icon($marks; $re)) \(icon($re)) \($age) \($cache) \(.tmux_target // "-" | fit(8)) \(.window_name // "" | fit(12)) \(.project // "" | fit(14)) \($msg | cut($mw))" as $line
     | "\(.pane // "")\t" + (if $re != "" then "\($re)\($line)\u001b[0m" else $line end)'
 }
 
@@ -541,7 +604,7 @@ seen() {
     tmp=$f.tmp.$$
     jq -c '.state = "ready" | .since = (now | floor)' "$f" >"$tmp" && mv -f "$tmp" "$f"
     rm -f "$tmp"
-    tmux set -p -t "$pane" @surikat ready 2>/dev/null
+    tmux set -p -t "$pane" @surikat ready \; set -pu -t "$pane" @surikat_cache 2>/dev/null
   done <<EOF
 $files
 EOF
@@ -703,7 +766,7 @@ watch_loop() {
   done
 }
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # --client NAME may appear anywhere.
 args=()
